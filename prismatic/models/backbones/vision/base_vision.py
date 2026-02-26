@@ -120,17 +120,23 @@ class TimmViTBackbone(VisionBackbone, ABC):
             )
         self.featurizer.eval()
 
-        # Monkey-Patch the `forward()` function of the featurizer to ensure FSDP-compatibility
-        #   => Note: By default set `get_intermediate_layers` to return the *SECOND-TO-LAST* layer patches!
-        #   => TODO (siddk) Remove after resolution of https://github.com/pytorch/pytorch/issues/109385
-        self.featurizer.forward = unpack_tuple(
-            partial(self.featurizer.get_intermediate_layers, n={len(self.featurizer.blocks) - 2})
-        )
+        # Monkey-Patch `forward()` to return patch/grid features in a consistent way.
+        # Some backbones (e.g. DINOv3 EVA) do not expose `get_intermediate_layers`.
+        if hasattr(self.featurizer, "get_intermediate_layers"):
+            self.featurizer.forward = unpack_tuple(
+                partial(self.featurizer.get_intermediate_layers, n={len(self.featurizer.blocks) - 2})
+            )
+        elif hasattr(self.featurizer, "forward_features"):
+            self.featurizer.forward = self.featurizer.forward_features
+        else:
+            raise ValueError(
+                f"Backbone `{type(self.featurizer)}` exposes neither `get_intermediate_layers` nor `forward_features`."
+            )
 
-        # Validation =>> for now, this class *only* supports TIMM Vision Transformers (but can be extended!)
-        assert isinstance(self.featurizer, VisionTransformer), (
-            "Featurizer is not a TIMM VisionTransformer; if you would like to support a new visual representation, "
-            "file an issue or implement the requisite logic (see `prismatic/models/backbones/vision/base_vision.py`)!"
+        # Validation =>> require ViT-like modules with patch embedding and transformer blocks.
+        assert hasattr(self.featurizer, "patch_embed") and hasattr(self.featurizer, "blocks"), (
+            "Featurizer is not ViT-like (missing `patch_embed` or `blocks`); please extend "
+            "`prismatic/models/backbones/vision/base_vision.py` for this backbone."
         )
 
         # Get Config =>> Note :: Override default image size to ensure correct image transform
@@ -182,8 +188,10 @@ class TimmViTBackbone(VisionBackbone, ABC):
 
     def get_fsdp_wrapping_policy(self) -> Callable:
         """Return a simple FSDP policy that wraps each ViT block and then the _entire_ featurizer."""
-        vit_wrap_policy = partial(_module_wrap_policy, module_classes={VisionTransformer})
-        transformer_block_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={Block})
+        featurizer_cls = type(self.featurizer)
+        block_cls = type(self.featurizer.blocks[0]) if len(self.featurizer.blocks) > 0 else Block
+        vit_wrap_policy = partial(_module_wrap_policy, module_classes={featurizer_cls})
+        transformer_block_policy = partial(transformer_auto_wrap_policy, transformer_layer_cls={block_cls})
         return partial(_or_policy, policies=[vit_wrap_policy, transformer_block_policy])
 
     def forward(self, pixel_values: Union[torch.Tensor, Dict[str, torch.Tensor]]) -> torch.Tensor:

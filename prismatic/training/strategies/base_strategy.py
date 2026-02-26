@@ -111,6 +111,8 @@ class TrainingStrategy(ABC):
         seed: int = 7,
     ) -> None:
         """Run the training loop for the given `dataset` and `collator`; log losses, results to `metrics`"""
+        checkpoint_every_steps = 100
+
         if "finetune" in stage and batch_construction_strategy == "split-modality":
             # Instantiate the split-modality sampler; if you want to extend with other batch construction schemes,
             #   (e.g., grouping by length) =>> can easily add them here!
@@ -149,7 +151,7 @@ class TrainingStrategy(ABC):
         steps_per_epoch = len(dataloader) // self.grad_accumulation_steps
         if self.max_steps is not None and steps_per_epoch < self.max_steps:
             # Just set `epochs` to some large number --> we'll short-circuit based on steps anyway
-            self.epochs = 100
+            self.epochs = 1000000
 
         # === Train ===
         status = metrics.get_status()
@@ -228,6 +230,10 @@ class TrainingStrategy(ABC):
                             dist.barrier()
 
                             return
+
+                        # Periodic checkpointing for long runs.
+                        if metrics.global_step % checkpoint_every_steps == 0:
+                            self.save_checkpoint(metrics.run_dir, metrics.global_step, epoch, loss.item())
 
                         # Update Progress Bar
                         progress.update()

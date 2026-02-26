@@ -10,11 +10,13 @@ from typing import Optional, Tuple
 from transformers import PreTrainedTokenizerBase
 
 from prismatic.models.backbones.llm import LLaMa2LLMBackbone, LLMBackbone, MistralLLMBackbone, PhiLLMBackbone
+from prismatic.models.backbones.llm import Qwen3VLTextLLMBackbone
 from prismatic.models.backbones.vision import (
     CLIPViTBackbone,
     DinoCLIPViTBackbone,
     DinoSigLIPViTBackbone,
     DinoV2ViTBackbone,
+    DinoV3ViTBackbone,
     ImageTransform,
     IN1KViTBackbone,
     SigLIPViTBackbone,
@@ -31,6 +33,11 @@ VISION_BACKBONES = {
     "clip-vit-l": {"cls": CLIPViTBackbone, "kwargs": {"default_image_size": 224}},
     "siglip-vit-so400m": {"cls": SigLIPViTBackbone, "kwargs": {"default_image_size": 224}},
     "dinov2-vit-l": {"cls": DinoV2ViTBackbone, "kwargs": {"default_image_size": 224}},
+    "dinov3-vit-s": {"cls": DinoV3ViTBackbone, "kwargs": {"default_image_size": 224}},
+    "dinov3-vit-b": {"cls": DinoV3ViTBackbone, "kwargs": {"default_image_size": 224}},
+    "dinov3-vit-l": {"cls": DinoV3ViTBackbone, "kwargs": {"default_image_size": 224}},
+    "dinov3-vit-h+": {"cls": DinoV3ViTBackbone, "kwargs": {"default_image_size": 224}},
+    "dinov3-vit-7b": {"cls": DinoV3ViTBackbone, "kwargs": {"default_image_size": 224}},
     "in1k-vit-l": {"cls": IN1KViTBackbone, "kwargs": {"default_image_size": 224}},
     "dinosiglip-vit-so-224px": {"cls": DinoSigLIPViTBackbone, "kwargs": {"default_image_size": 224}},
 
@@ -70,6 +77,9 @@ LLM_BACKBONES = {
 
     # === Phi-2 Backbone ===
     "phi-2-3b": {"cls": PhiLLMBackbone, "kwargs": {}},
+
+    # === Qwen3-VL Text-Only Backbone ===
+    "qwen3vl-text-8b-instruct": {"cls": Qwen3VLTextLLMBackbone, "kwargs": {"local_files_only": True}},
 }
 
 # fmt: on
