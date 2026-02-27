@@ -81,6 +81,10 @@ class PretrainConfig:
     wandb_project: str = "onyx-vlms"
     wandb_entity: str = "stanford-voltron"
 
+    # Evaluation Parameters (`align` only; disabled if `eval_every_n_steps` is None)
+    eval_every_n_steps: Optional[int] = 200
+    eval_max_batches: Optional[int] = None
+
     def __post_init__(self) -> None:
         """Set optimization parameters based on `stage` in {"align", "finetune"}."""
         if self.stage == "align":
@@ -185,7 +189,27 @@ def pretrain(cfg: PretrainConfig) -> None:
         prompt_builder_fn=llm_backbone.prompt_builder_fn,
         default_image_resolution=vision_backbone.default_image_resolution,
         padding_side=tokenizer.padding_side,
+        split="train",
     )
+
+    val_dataset = None
+    if cfg.stage == "align" and cfg.eval_every_n_steps is not None and cfg.eval_every_n_steps > 0:
+        if cfg.dataset.align_val_stage_components is None:
+            overwatch.warning(
+                "Validation is enabled, but `dataset.align_val_stage_components` is not set; skipping val loss."
+            )
+        else:
+            overwatch.info(f"Creating Validation Dataset `{cfg.dataset.dataset_id}` => Stage: `{cfg.stage}`")
+            val_dataset, _ = get_dataset_and_collator(
+                cfg.stage,
+                cfg.dataset,
+                image_transform,
+                tokenizer,
+                prompt_builder_fn=llm_backbone.prompt_builder_fn,
+                default_image_resolution=vision_backbone.default_image_resolution,
+                padding_side=tokenizer.padding_side,
+                split="val",
+            )
 
     # Create Train Strategy
     overwatch.info(f"Initializing Train Strategy `{cfg.train_strategy}`")
@@ -222,9 +246,40 @@ def pretrain(cfg: PretrainConfig) -> None:
         grad_accumulation_steps=train_strategy.grad_accumulation_steps,
     )
 
+    # Log one-shot run metadata so trackers capture all key run context.
+    total_params = sum(param.numel() for param in vlm.parameters())
+    trainable_params = sum(param.numel() for param in vlm.parameters() if param.requires_grad)
+    stage_prefix = cfg.stage.capitalize()
+    metrics.log(
+        0,
+        metrics={
+            f"{stage_prefix}/Step": 0,
+            f"{stage_prefix}/Train Examples": len(train_dataset),
+            f"{stage_prefix}/Val Examples": len(val_dataset) if val_dataset is not None else 0,
+            f"{stage_prefix}/Eval Every N Steps": cfg.eval_every_n_steps if cfg.eval_every_n_steps is not None else -1,
+            f"{stage_prefix}/Eval Max Batches": cfg.eval_max_batches if cfg.eval_max_batches is not None else -1,
+            f"{stage_prefix}/Global Batch Size": cfg.global_batch_size,
+            f"{stage_prefix}/Per Device Batch Size": cfg.per_device_batch_size,
+            f"{stage_prefix}/Grad Accumulation Steps": train_strategy.grad_accumulation_steps,
+            f"{stage_prefix}/Max Steps": cfg.max_steps if cfg.max_steps is not None else -1,
+            f"{stage_prefix}/Total Parameters": total_params,
+            f"{stage_prefix}/Trainable Parameters": trainable_params,
+            f"{stage_prefix}/Trainable Parameter Ratio": trainable_params / total_params,
+        },
+    )
+
     # Run Training
     overwatch.info("Starting Training Loop")
-    train_strategy.run_training(train_dataset, collator, metrics, stage=cfg.stage, seed=cfg.seed)
+    train_strategy.run_training(
+        train_dataset,
+        collator,
+        metrics,
+        val_dataset=val_dataset,
+        eval_every_n_steps=cfg.eval_every_n_steps,
+        eval_max_batches=cfg.eval_max_batches,
+        stage=cfg.stage,
+        seed=cfg.seed,
+    )
 
     # Finalize
     overwatch.info("Done with Training =>> Finalizing Metrics")

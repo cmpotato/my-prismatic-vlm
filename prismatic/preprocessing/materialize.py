@@ -28,6 +28,7 @@ def get_dataset_and_collator(
     prompt_builder_fn: Type[PromptBuilder],
     default_image_resolution: Tuple[int, int, int],
     padding_side: str = "right",
+    split: str = "train",
 ) -> Tuple[Dataset, PaddedCollatorForLanguageModeling]:
     dataset_cls = DATASET_INITIALIZER[stage]
     dataset_root_dir = dataset_cfg.dataset_root_dir
@@ -37,7 +38,15 @@ def get_dataset_and_collator(
 
     # Switch on `stage`
     if stage == "align":
-        annotation_json, image_dir = dataset_cfg.align_stage_components
+        if split == "train":
+            annotation_json, image_dir = dataset_cfg.align_stage_components
+        elif split == "val":
+            if dataset_cfg.align_val_stage_components is None:
+                raise ValueError("`align_val_stage_components` is not configured for this dataset!")
+            annotation_json, image_dir = dataset_cfg.align_val_stage_components
+        else:
+            raise ValueError(f"Split `{split}` is not supported for `align` stage!")
+
         dataset = dataset_cls(
             dataset_root_dir / annotation_json, dataset_root_dir / image_dir, image_transform, tokenizer
         )

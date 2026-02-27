@@ -10,6 +10,7 @@ heavy lifting.
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+import time
 from typing import Callable, Optional
 
 import torch
@@ -101,11 +102,56 @@ class TrainingStrategy(ABC):
     @abstractmethod
     def clip_grad_norm(self) -> None: ...
 
+    def run_evaluation(
+        self,
+        val_dataloader: DataLoader,
+        eval_max_batches: Optional[int] = None,
+    ) -> tuple[float, int, float]:
+        """Compute mean validation loss across all processes."""
+        eval_start_time = time.time()
+        self.vlm.eval()
+        device = torch.device("cuda", self.device_id)
+        loss_sum = torch.zeros(1, device=device, dtype=torch.float32)
+        n_batches = torch.zeros(1, device=device, dtype=torch.float32)
+
+        with torch.no_grad():
+            for val_idx, batch in enumerate(val_dataloader):
+                if eval_max_batches is not None and val_idx >= eval_max_batches:
+                    break
+
+                with torch.autocast(
+                    "cuda",
+                    dtype=self.mixed_precision_dtype,
+                    enabled=self.enable_mixed_precision_training,
+                ):
+                    output: CausalLMOutputWithPast = self.vlm(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        pixel_values=batch["pixel_values"],
+                        labels=batch["labels"],
+                        multimodal_indices=batch["multimodal_indices"],
+                    )
+
+                loss_sum += output.loss.detach().to(dtype=torch.float32)
+                n_batches += 1
+
+        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(n_batches, op=dist.ReduceOp.SUM)
+
+        self.vlm.train()
+        if n_batches.item() == 0:
+            return float("nan"), 0, time.time() - eval_start_time
+
+        return (loss_sum / n_batches).item(), int(n_batches.item()), time.time() - eval_start_time
+
     def run_training(
         self,
         dataset: Dataset,
         collator: PaddedCollatorForLanguageModeling,
         metrics: Metrics,
+        val_dataset: Optional[Dataset] = None,
+        eval_every_n_steps: Optional[int] = None,
+        eval_max_batches: Optional[int] = None,
         stage: str = "finetune",
         batch_construction_strategy: str = "split-modality",
         seed: int = 7,
@@ -146,6 +192,25 @@ class TrainingStrategy(ABC):
             num_workers=2,
             worker_init_fn=self.worker_init_fn,
         )
+
+        val_dataloader = None
+        if val_dataset is not None:
+            val_sampler = DistributedSampler(
+                val_dataset,
+                num_replicas=overwatch.world_size(),
+                rank=overwatch.rank(),
+                shuffle=False,
+                seed=seed,
+                drop_last=False,
+            )
+            val_dataloader = DataLoader(
+                val_dataset,
+                batch_size=self.per_device_batch_size,
+                sampler=val_sampler,
+                collate_fn=collator,
+                num_workers=2,
+                worker_init_fn=self.worker_init_fn,
+            )
 
         # Max Steps vs. Epochs Computation
         steps_per_epoch = len(dataloader) // self.grad_accumulation_steps
@@ -223,6 +288,25 @@ class TrainingStrategy(ABC):
                         # Push Metrics
                         metrics.commit(global_step=metrics.global_step + 1, lr=self.lr_scheduler.get_last_lr()[0])
                         status = metrics.push()
+
+                        if (
+                            val_dataloader is not None
+                            and eval_every_n_steps is not None
+                            and eval_every_n_steps > 0
+                            and metrics.global_step % eval_every_n_steps == 0
+                        ):
+                            val_loss, val_batches, eval_time = self.run_evaluation(
+                                val_dataloader, eval_max_batches=eval_max_batches
+                            )
+                            metrics.log(
+                                metrics.global_step,
+                                metrics={
+                                    f"{stage.capitalize()}/Step": metrics.global_step,
+                                    f"{stage.capitalize()}/Val Loss": val_loss,
+                                    f"{stage.capitalize()}/Val Batches": val_batches,
+                                    f"{stage.capitalize()}/Val Time": eval_time,
+                                },
+                            )
 
                         # Check for Termination & Save Final Checkpoint (in case `max_steps` is not None)
                         if self.max_steps is not None and metrics.global_step >= self.max_steps:

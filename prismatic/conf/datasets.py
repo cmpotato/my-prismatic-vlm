@@ -12,7 +12,7 @@ and processing scheme. A given dataset variant (e.g., `llava-lightning`) configu
 from dataclasses import dataclass
 from enum import Enum, unique
 from pathlib import Path
-from typing import Tuple
+from typing import Optional, Tuple
 
 from draccus import ChoiceRegistry
 
@@ -24,6 +24,7 @@ class DatasetConfig(ChoiceRegistry):
 
     # Dataset Components for each Stage in < align | finetune >
     align_stage_components: Tuple[Path, Path]       # Path to annotation file and images directory for `align` stage
+    align_val_stage_components: Optional[Tuple[Path, Path]]  # Optional annotation/images for align validation
     finetune_stage_components: Tuple[Path, Path]    # Path to annotation file and images directory for `finetune` stage
 
     dataset_root_dir: Path                          # Path to dataset root directory; others paths are relative to root
@@ -36,7 +37,11 @@ class LLaVa_V15_Config(DatasetConfig):
     dataset_id: str = "llava-v15"
 
     align_stage_components: Tuple[Path, Path] = (
-        Path("download/llava-laion-cc-sbu-558k/chat.json"),
+        Path("download/llava-laion-cc-sbu-558k/chat_train.json"),
+        Path("download/llava-laion-cc-sbu-558k/"),
+    )
+    align_val_stage_components: Optional[Tuple[Path, Path]] = (
+        Path("download/llava-laion-cc-sbu-558k/chat_val.json"),
         Path("download/llava-laion-cc-sbu-558k/"),
     )
     finetune_stage_components: Tuple[Path, Path] = (
@@ -55,6 +60,7 @@ class LLaVa_Multimodal_Only_Config(DatasetConfig):
         Path("download/llava-laion-cc-sbu-558k/chat.json"),
         Path("download/llava-laion-cc-sbu-558k/"),
     )
+    align_val_stage_components: Optional[Tuple[Path, Path]] = None
     finetune_stage_components: Tuple[Path, Path] = (
         Path("download/llava-v1.5-instruct/llava_v1_5_stripped625k.json"),
         Path("download/llava-v1.5-instruct/"),
@@ -71,6 +77,7 @@ class LLaVa_LVIS4V_Config(DatasetConfig):
         Path("download/llava-laion-cc-sbu-558k/chat.json"),
         Path("download/llava-laion-cc-sbu-558k/"),
     )
+    align_val_stage_components: Optional[Tuple[Path, Path]] = None
     finetune_stage_components: Tuple[Path, Path] = (
         Path("download/llava-v1.5-instruct/llava_v1_5_lvis4v_mix888k.json"),
         Path("download/llava-v1.5-instruct/"),
@@ -87,6 +94,7 @@ class LLaVa_LRV_Config(DatasetConfig):
         Path("download/llava-laion-cc-sbu-558k/chat.json"),
         Path("download/llava-laion-cc-sbu-558k/"),
     )
+    align_val_stage_components: Optional[Tuple[Path, Path]] = None
     finetune_stage_components: Tuple[Path, Path] = (
         Path("download/llava-v1.5-instruct/llava_v1_5_lrv_mix1008k.json"),
         Path("download/llava-v1.5-instruct/"),
@@ -103,6 +111,7 @@ class LLaVa_LVIS4V_LRV_Config(DatasetConfig):
         Path("download/llava-laion-cc-sbu-558k/chat.json"),
         Path("download/llava-laion-cc-sbu-558k/"),
     )
+    align_val_stage_components: Optional[Tuple[Path, Path]] = None
     finetune_stage_components: Tuple[Path, Path] = (
         Path("download/llava-v1.5-instruct/llava_v1_5_lvis4v_lrv_mix1231k.json"),
         Path("download/llava-v1.5-instruct/"),

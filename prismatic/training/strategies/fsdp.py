@@ -102,6 +102,36 @@ class FSDPStrategy(TrainingStrategy):
         """Save a checkpoint to the `run_dir` only containing the state_dicts for trainable parameters by default."""
         assert isinstance(self.vlm, FSDP), "FSDPStrategy.save_checkpoint assumes VLM is already wrapped in FSDP!"
 
+        def _save_model_state_dicts(model_state_dicts: dict) -> None:
+            if not overwatch.is_rank_zero():
+                return
+
+            checkpoint_dir = run_dir / "checkpoints"
+            if train_loss is None:
+                checkpoint_path = checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss=inf.pt"
+            else:
+                checkpoint_path = checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss={train_loss:.4f}.pt"
+
+            # Save Checkpoint & Copy Latest to `latest-checkpoint.pt`
+            torch.save({"model": model_state_dicts}, checkpoint_path)
+            shutil.copy(checkpoint_path, checkpoint_dir / "latest-checkpoint.pt")
+
+        # Fast path for align stage: only projector is trainable, so avoid materializing full VLM state_dict.
+        # This sidesteps FSDP shared-parameter bookkeeping in frozen LLM modules and matches downstream load contract.
+        if only_trainable and self.trainable_module_keys == ["projector"]:
+            projector_module = self.vlm.module.projector
+            if isinstance(projector_module, FSDP):
+                with FSDP.state_dict_type(projector_module, self.fsdp_state_dict_type, self.fsdp_save_policy):
+                    projector_state_dict = projector_module.state_dict()
+            else:
+                projector_state_dict = projector_module.state_dict()
+
+            projector_state_dict = OrderedDict(
+                (k, v.cpu() if isinstance(v, torch.Tensor) else v) for k, v in projector_state_dict.items()
+            )
+            _save_model_state_dicts({"projector": projector_state_dict})
+            return
+
         # Summon Full State Dictionary =>> Reconstitute from Shards
         with FSDP.state_dict_type(self.vlm, self.fsdp_state_dict_type, self.fsdp_save_policy):
             full_vlm_state_dict = self.vlm.state_dict()
@@ -115,19 +145,7 @@ class FSDPStrategy(TrainingStrategy):
                     if key.startswith(mprefix := f"{mkey}."):
                         model_state_dicts[mkey][key.removeprefix(mprefix)] = param
 
-            # Save on rank zero *only*
-            if overwatch.is_rank_zero():
-                checkpoint_dir = run_dir / "checkpoints"
-                if train_loss is None:
-                    checkpoint_path = checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss=inf.pt"
-                else:
-                    checkpoint_path = (
-                        checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss={train_loss:.4f}.pt"
-                    )
-
-                # Save Checkpoint & Copy Latest to `latest-checkpoint.pt`
-                torch.save({"model": model_state_dicts}, checkpoint_path)
-                shutil.copy(checkpoint_path, checkpoint_dir / "latest-checkpoint.pt")
+            _save_model_state_dicts(model_state_dicts)
 
     def run_setup(self, run_dir: Path, n_train_examples: int) -> None:
         # Iteratively Assemble FSDP Wrapping Policy by fetching the wrapping policies for each backbone/constituent

@@ -148,3 +148,4 @@ dmypy.json
 cache/
 data/
 runs/
+runs_smoke/
