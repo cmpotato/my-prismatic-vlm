@@ -17,7 +17,7 @@ from typing import Dict, List, Tuple, Type
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from transformers import CodeGenTokenizerFast, LlamaTokenizerFast, PreTrainedTokenizerBase
+from transformers import LlamaTokenizerFast, PreTrainedTokenizerBase
 
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import ImageTransform
@@ -144,13 +144,7 @@ class FinetuneDataset(Dataset[Dict[str, torch.Tensor]]):
             # Llama Tokenizer (Fast) adds extra character if a string ends in whitespace --> strip if non-empty!
             if isinstance(self.tokenizer, LlamaTokenizerFast):
                 msg = msg.rstrip()
-
-            # Phi-2 Tokenizer == CodeGenTokenizer (Fast) -- no special handling!
-            elif isinstance(self.tokenizer, CodeGenTokenizerFast):
-                pass
-
-            else:
-                raise ValueError(f"Tokenizer of type `{type(self.tokenizer)}` is not explicitly handled!")
+            # Other tokenizer families (e.g., Qwen) follow generic behavior.
 
             # Tokenize Input IDs
             turn_input_ids = self.tokenizer(msg, add_special_tokens=turn_idx == 0).input_ids

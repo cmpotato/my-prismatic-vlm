@@ -35,6 +35,7 @@ def get_train_strategy(
     enable_gradient_checkpointing: bool = True,
     enable_mixed_precision_training: bool = True,
     reduce_in_full_precision: bool = False,
+    save_lora_adapter_only: bool = False,
     mixed_precision_dtype: torch.dtype = torch.bfloat16,
     worker_init_fn: Optional[Callable[[int], None]] = None,
 ) -> TrainingStrategy:
@@ -55,6 +56,7 @@ def get_train_strategy(
             enable_gradient_checkpointing=enable_gradient_checkpointing,
             enable_mixed_precision_training=enable_mixed_precision_training,
             reduce_in_full_precision=reduce_in_full_precision,
+            save_lora_adapter_only=save_lora_adapter_only,
             mixed_precision_dtype=mixed_precision_dtype,
             worker_init_fn=worker_init_fn,
             **strategy_cfg["kwargs"],

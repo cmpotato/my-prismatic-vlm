@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
-from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler, Subset
 from tqdm import tqdm
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -48,6 +48,7 @@ class TrainingStrategy(ABC):
         enable_gradient_checkpointing: bool = True,
         enable_mixed_precision_training: bool = True,
         reduce_in_full_precision: bool = False,
+        save_lora_adapter_only: bool = False,
         mixed_precision_dtype: torch.dtype = torch.bfloat16,
         worker_init_fn: Optional[Callable[[int], None]] = None,
         **_: str,
@@ -69,6 +70,7 @@ class TrainingStrategy(ABC):
         self.enable_gradient_checkpointing = enable_gradient_checkpointing
         self.enable_mixed_precision_training = enable_mixed_precision_training
         self.reduce_in_full_precision = reduce_in_full_precision
+        self.save_lora_adapter_only = save_lora_adapter_only
         self.mixed_precision_dtype = mixed_precision_dtype
 
         # DataLoader Parameters
@@ -101,6 +103,24 @@ class TrainingStrategy(ABC):
 
     @abstractmethod
     def clip_grad_norm(self) -> None: ...
+
+    @staticmethod
+    def _get_finetune_modality_lengths(dataset: Dataset) -> list[tuple[bool, int]]:
+        """
+        Resolve `(is_multimodal, length)` metadata for finetune datasets.
+
+        Supports `Subset` wrappers so train/val splits can still use split-modality batching.
+        """
+        if isinstance(dataset, Subset):
+            parent_modality_lengths = TrainingStrategy._get_finetune_modality_lengths(dataset.dataset)
+            return [parent_modality_lengths[idx] for idx in dataset.indices]
+
+        if hasattr(dataset, "get_modality_lengths"):
+            return dataset.get_modality_lengths()
+
+        raise ValueError(
+            f"Dataset of type `{type(dataset)}` does not expose `get_modality_lengths()` required for split-modality."
+        )
 
     def run_evaluation(
         self,
@@ -157,12 +177,12 @@ class TrainingStrategy(ABC):
         seed: int = 7,
     ) -> None:
         """Run the training loop for the given `dataset` and `collator`; log losses, results to `metrics`"""
-        checkpoint_every_steps = 100
+        checkpoint_every_steps = 200 if "finetune" in stage else 100
 
         if "finetune" in stage and batch_construction_strategy == "split-modality":
             # Instantiate the split-modality sampler; if you want to extend with other batch construction schemes,
             #   (e.g., grouping by length) =>> can easily add them here!
-            modality_lengths = dataset.get_modality_lengths()
+            modality_lengths = self._get_finetune_modality_lengths(dataset)
             sampler = SplitModalitySampler(
                 dataset,
                 modality_lengths,
@@ -277,8 +297,10 @@ class TrainingStrategy(ABC):
                     if (train_idx + 1) % self.grad_accumulation_steps == 0:
                         metrics.commit(update_step_time=True)
 
-                        # Clip Gradients --> this is custom, per-strategy because of DDP vs. FSDP locality-assumptions
-                        self.clip_grad_norm()
+                        # Clip gradients only when enabled (`max_grad_norm > 0`).
+                        if self.max_grad_norm > 0:
+                            # This is custom, per-strategy because of DDP vs. FSDP locality-assumptions.
+                            self.clip_grad_norm()
 
                         # Optimizer & LR Scheduler Step
                         self.optimizer.step()
@@ -289,6 +311,7 @@ class TrainingStrategy(ABC):
                         metrics.commit(global_step=metrics.global_step + 1, lr=self.lr_scheduler.get_last_lr()[0])
                         status = metrics.push()
 
+                        did_eval_this_step = False
                         if (
                             val_dataloader is not None
                             and eval_every_n_steps is not None
@@ -307,9 +330,26 @@ class TrainingStrategy(ABC):
                                     f"{stage.capitalize()}/Val Time": eval_time,
                                 },
                             )
+                            did_eval_this_step = True
 
                         # Check for Termination & Save Final Checkpoint (in case `max_steps` is not None)
                         if self.max_steps is not None and metrics.global_step >= self.max_steps:
+                            # Always log a final validation loss before returning (if a val set exists) so short smoke
+                            # runs still contain val metrics even when `eval_every_n_steps` > `max_steps`.
+                            if val_dataloader is not None and not did_eval_this_step:
+                                val_loss, val_batches, eval_time = self.run_evaluation(
+                                    val_dataloader, eval_max_batches=eval_max_batches
+                                )
+                                metrics.log(
+                                    metrics.global_step,
+                                    metrics={
+                                        f"{stage.capitalize()}/Step": metrics.global_step,
+                                        f"{stage.capitalize()}/Val Loss": val_loss,
+                                        f"{stage.capitalize()}/Val Batches": val_batches,
+                                        f"{stage.capitalize()}/Val Time": eval_time,
+                                    },
+                                )
+
                             self.save_checkpoint(metrics.run_dir, metrics.global_step, epoch, loss.item())
                             dist.barrier()
 
@@ -325,5 +365,19 @@ class TrainingStrategy(ABC):
 
             # Save checkpoint at end each epoch (if `self.max_steps` is None)
             if self.max_steps is None:
+                if val_dataloader is not None:
+                    val_loss, val_batches, eval_time = self.run_evaluation(
+                        val_dataloader, eval_max_batches=eval_max_batches
+                    )
+                    metrics.log(
+                        metrics.global_step,
+                        metrics={
+                            f"{stage.capitalize()}/Step": metrics.global_step,
+                            f"{stage.capitalize()}/Val Loss": val_loss,
+                            f"{stage.capitalize()}/Val Batches": val_batches,
+                            f"{stage.capitalize()}/Val Time": eval_time,
+                        },
+                    )
+
                 self.save_checkpoint(metrics.run_dir, metrics.global_step, epoch, loss.item())
                 dist.barrier()

@@ -31,6 +31,7 @@ import draccus
 import torch
 import torch.distributed as dist
 import yaml
+from torch.utils.data import Subset
 
 from prismatic.conf import DatasetConfig, DatasetRegistry, ModelConfig, ModelRegistry
 from prismatic.models import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform, get_vlm
@@ -81,12 +82,16 @@ class PretrainConfig:
     wandb_project: str = "onyx-vlms"
     wandb_entity: str = "stanford-voltron"
 
-    # Evaluation Parameters (`align` only; disabled if `eval_every_n_steps` is None)
+    # Evaluation Parameters (disabled if `eval_every_n_steps` is None)
     eval_every_n_steps: Optional[int] = 200
     eval_max_batches: Optional[int] = None
+    finetune_val_ratio: float = 0.2
 
     def __post_init__(self) -> None:
         """Set optimization parameters based on `stage` in {"align", "finetune"}."""
+        if not (0.0 <= self.finetune_val_ratio < 1.0):
+            raise ValueError("`finetune_val_ratio` must satisfy 0.0 <= ratio < 1.0")
+
         if self.stage == "align":
             self.epochs = self.model.align_epochs
             self.max_steps = self.model.align_max_steps
@@ -179,6 +184,23 @@ def pretrain(cfg: PretrainConfig) -> None:
     overwatch.info(f"Invoking `VLM.load_checkpoint()` for `{model_id}` => Training Stage: `{cfg.stage}`")
     vlm.load_from_checkpoint(cfg.stage, run_dir, pretrained_checkpoint=cfg.pretrained_checkpoint)
 
+    # Optional LoRA injection for finetune stage.
+    if cfg.model.finetune_use_lora:
+        if cfg.stage != "finetune":
+            raise ValueError("LoRA is currently supported only when `--stage finetune`.")
+        if not hasattr(vlm.llm_backbone, "enable_lora"):
+            raise ValueError(
+                f"LLM backbone `{cfg.model.llm_backbone_id}` does not implement `enable_lora(...)`."
+            )
+
+        overwatch.info(f"Invoking `LLM.enable_lora()` for `{cfg.model.llm_backbone_id}`", ctx_level=1)
+        vlm.llm_backbone.enable_lora(
+            r=cfg.model.lora_r,
+            lora_alpha=cfg.model.lora_alpha,
+            lora_dropout=cfg.model.lora_dropout,
+            target_modules=cfg.model.lora_target_modules,
+        )
+
     # Get Dataset for Specified Stage
     overwatch.info(f"Creating Dataset `{cfg.dataset.dataset_id}` => Stage: `{cfg.stage}`")
     train_dataset, collator = get_dataset_and_collator(
@@ -193,23 +215,53 @@ def pretrain(cfg: PretrainConfig) -> None:
     )
 
     val_dataset = None
-    if cfg.stage == "align" and cfg.eval_every_n_steps is not None and cfg.eval_every_n_steps > 0:
-        if cfg.dataset.align_val_stage_components is None:
-            overwatch.warning(
-                "Validation is enabled, but `dataset.align_val_stage_components` is not set; skipping val loss."
-            )
-        else:
-            overwatch.info(f"Creating Validation Dataset `{cfg.dataset.dataset_id}` => Stage: `{cfg.stage}`")
-            val_dataset, _ = get_dataset_and_collator(
-                cfg.stage,
-                cfg.dataset,
-                image_transform,
-                tokenizer,
-                prompt_builder_fn=llm_backbone.prompt_builder_fn,
-                default_image_resolution=vision_backbone.default_image_resolution,
-                padding_side=tokenizer.padding_side,
-                split="val",
-            )
+    if cfg.eval_every_n_steps is not None and cfg.eval_every_n_steps > 0:
+        if cfg.stage == "align":
+            if cfg.dataset.align_val_stage_components is None:
+                overwatch.warning(
+                    "Validation is enabled, but `dataset.align_val_stage_components` is not set; skipping val loss."
+                )
+            else:
+                overwatch.info(f"Creating Validation Dataset `{cfg.dataset.dataset_id}` => Stage: `{cfg.stage}`")
+                val_dataset, _ = get_dataset_and_collator(
+                    cfg.stage,
+                    cfg.dataset,
+                    image_transform,
+                    tokenizer,
+                    prompt_builder_fn=llm_backbone.prompt_builder_fn,
+                    default_image_resolution=vision_backbone.default_image_resolution,
+                    padding_side=tokenizer.padding_side,
+                    split="val",
+                )
+
+        elif cfg.stage.endswith("finetune"):
+            if cfg.finetune_val_ratio <= 0:
+                overwatch.warning("`finetune_val_ratio <= 0`; skipping finetune validation split.")
+            else:
+                n_total = len(train_dataset)
+                if n_total < 2:
+                    overwatch.warning(
+                        f"Dataset has only {n_total} example(s); skipping finetune validation split."
+                    )
+                else:
+                    n_val = int(n_total * cfg.finetune_val_ratio)
+                    if n_val <= 0:
+                        n_val = 1
+                    if n_val >= n_total:
+                        n_val = n_total - 1
+
+                    split_generator = torch.Generator()
+                    split_generator.manual_seed(cfg.seed)
+                    indices = torch.randperm(n_total, generator=split_generator).tolist()
+                    val_indices, train_indices = indices[:n_val], indices[n_val:]
+
+                    full_train_dataset = train_dataset
+                    train_dataset = Subset(full_train_dataset, train_indices)
+                    val_dataset = Subset(full_train_dataset, val_indices)
+                    overwatch.info(
+                        f"Created finetune train/val split from training data "
+                        f"(train={len(train_dataset)}, val={len(val_dataset)}, val_ratio={cfg.finetune_val_ratio:.2f})"
+                    )
 
     # Create Train Strategy
     overwatch.info(f"Initializing Train Strategy `{cfg.train_strategy}`")
@@ -229,6 +281,7 @@ def pretrain(cfg: PretrainConfig) -> None:
         enable_gradient_checkpointing=cfg.model.enable_gradient_checkpointing,
         enable_mixed_precision_training=cfg.model.enable_mixed_precision_training,
         reduce_in_full_precision=cfg.model.reduce_in_full_precision,
+        save_lora_adapter_only=cfg.model.finetune_save_lora_adapter_only,
         worker_init_fn=worker_init_fn,
     )
     train_strategy.run_setup(run_dir=run_dir, n_train_examples=len(train_dataset))

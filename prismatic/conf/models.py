@@ -11,7 +11,7 @@ variant thereof. A given model variant configures the following attributes:
 
 from dataclasses import dataclass
 from enum import Enum, unique
-from typing import Optional
+from typing import Optional, Tuple
 
 from draccus import ChoiceRegistry
 
@@ -62,6 +62,22 @@ class ModelConfig(ChoiceRegistry):
     finetune_warmup_ratio: float                            # Fraction of total steps to warmup
 
     finetune_train_strategy: str                            # Finetune Train Strategy (default: "fsdp-full-shard")
+
+    # Optional LoRA Adaptation for Finetune Stage
+    finetune_use_lora: bool = False                         # Whether to enable LoRA on LLM backbone for finetune
+    finetune_save_lora_adapter_only: bool = False          # Save only LoRA adapter (+ projector) checkpoints
+    lora_r: int = 16                                        # LoRA rank
+    lora_alpha: int = 32                                    # LoRA scaling alpha
+    lora_dropout: float = 0.05                              # LoRA dropout
+    lora_target_modules: Tuple[str, ...] = (               # Target module name substrings for LoRA injection
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    )
 
     # Enable Gradient/Activation Checkpointing (for the LLM Backbone)
     enable_gradient_checkpointing: bool = True
@@ -500,6 +516,13 @@ class Prism_DINOv3_Qwen3VLText_8B(Exp_7B_One_Stage):
     arch_specifier: str = "no-align+gelu-mlp"
 
 
+@dataclass
+class Prism_DINOv3_Qwen3VLText_8B_TwoStage(Prism_DINOv3_Qwen3VLText_8B):
+    # Two-stage variant: finetune requires projector weights from align stage.
+    model_id: str = "dinov3-qwen3vltext-2stage"
+    arch_specifier: str = "gelu-mlp"
+
+
 # === Define a Model Registry Enum for Reference & Validation ===
 @unique
 class ModelRegistry(Enum):
@@ -579,6 +602,7 @@ class ModelRegistry(Enum):
 
     # === Custom :: DINOv3 + Qwen3VL Text ===
     PRISM_DINOV3_QWEN3VLTEXT_8B = Prism_DINOv3_Qwen3VLText_8B
+    PRISM_DINOV3_QWEN3VLTEXT_8B_2STAGE = Prism_DINOv3_Qwen3VLText_8B_TwoStage
 
     @property
     def model_id(self) -> str:

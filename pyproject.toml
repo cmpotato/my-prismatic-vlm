@@ -36,6 +36,7 @@ dependencies = [
     # "flash_attn>=2.5.5",  # Here for documentation -- install *AFTER* editable install (follow README)
     "huggingface_hub",
     "jsonlines",
+    "peft>=0.12.0",
     "rich",
     "sentencepiece",
     "timm>=1.0.24",

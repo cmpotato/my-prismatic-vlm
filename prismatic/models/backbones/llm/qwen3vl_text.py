@@ -8,7 +8,7 @@ This wrapper intentionally exposes only the text decoder and lm_head as the LLM 
 from __future__ import annotations
 
 from functools import partial
-from typing import Callable, Optional, Sequence, Type
+from typing import Callable, Dict, Optional, Sequence, Type
 
 import torch
 import torch.nn.functional as F
@@ -152,6 +152,83 @@ class Qwen3VLTextLLMBackbone(LLMBackbone):
 
     def enable_gradient_checkpointing(self) -> None:
         self.llm.gradient_checkpointing_enable()
+
+    def enable_lora(
+        self,
+        *,
+        r: int,
+        lora_alpha: int,
+        lora_dropout: float,
+        target_modules: Sequence[str],
+    ) -> None:
+        """
+        Inject LoRA adapters into the Qwen text decoder.
+
+        After injection, only LoRA adapter parameters are trainable inside `self.llm`.
+        `lm_head` is kept frozen by default to minimize trainable parameter count.
+        """
+        if r <= 0:
+            raise ValueError(f"`lora_r` must be > 0, got {r}.")
+        if len(target_modules) == 0:
+            raise ValueError("`lora_target_modules` must not be empty when LoRA is enabled.")
+
+        try:
+            from peft import LoraConfig, TaskType, get_peft_model
+        except ImportError as e:
+            raise ImportError(
+                "LoRA requested but `peft` is not installed. Install with `pip install peft`."
+            ) from e
+
+        # Freeze dense LLM + head before wrapping; PEFT will re-enable LoRA params.
+        self.llm.requires_grad_(False)
+        self.lm_head.requires_grad_(False)
+
+        # `self.llm` is `Qwen3VLTextModel` (decoder-only), not `*ForCausalLM`.
+        # Use FEATURE_EXTRACTION wrapper to avoid CausalLM-specific generation hooks.
+        lora_cfg = LoraConfig(
+            task_type=TaskType.FEATURE_EXTRACTION,
+            inference_mode=False,
+            r=r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            target_modules=list(target_modules),
+            bias="none",
+        )
+        self.llm = get_peft_model(self.llm, lora_cfg)
+        self._lora_config = {
+            "r": r,
+            "lora_alpha": lora_alpha,
+            "lora_dropout": lora_dropout,
+            "target_modules": list(target_modules),
+        }
+
+        # Keep LoRA adapter dtype aligned with the Qwen backbone to satisfy FSDP's
+        # uniform-dtype flattening constraints.
+        lora_param_count = 0
+        for name, param in self.llm.named_parameters():
+            if "lora_" in name:
+                param.data = param.data.to(dtype=self.half_precision_dtype)
+                lora_param_count += param.numel()
+
+        n_total = sum(param.numel() for param in self.llm.parameters())
+        n_trainable = sum(param.numel() for param in self.llm.parameters() if param.requires_grad)
+        if n_trainable == 0:
+            raise RuntimeError("LoRA injection produced zero trainable LLM parameters; check `lora_target_modules`.")
+
+        overwatch.info(
+            "Enabled LoRA for Qwen text decoder "
+            f"(r={r}, alpha={lora_alpha}, dropout={lora_dropout}, "
+            f"target_modules={list(target_modules)}, "
+            f"lora_dtype={self.half_precision_dtype}, "
+            f"lora_params={lora_param_count}, trainable={n_trainable}/{n_total})",
+            ctx_level=1,
+        )
+
+    def has_lora_enabled(self) -> bool:
+        return hasattr(self.llm, "peft_config")
+
+    def get_lora_config(self) -> Optional[Dict[str, object]]:
+        return getattr(self, "_lora_config", None)
 
     def embed_input_ids(self, input_ids: torch.LongTensor) -> torch.Tensor:
         return self.llm.get_input_embeddings()(input_ids)

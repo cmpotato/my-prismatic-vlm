@@ -39,6 +39,24 @@ class DDPStrategy(TrainingStrategy):
             mkey: getattr(self.vlm.module, mkey).state_dict()
             for mkey in (self.trainable_module_keys if only_trainable else self.all_module_keys)
         }
+        checkpoint_metadata = None
+        if only_trainable and self.save_lora_adapter_only and "llm_backbone" in model_state_dicts:
+            llm_state_dict = model_state_dicts["llm_backbone"]
+            lora_state_dict = {k: v for k, v in llm_state_dict.items() if "lora_" in k}
+            if len(lora_state_dict) == 0:
+                overwatch.warning(
+                    "`save_lora_adapter_only=True` but no LoRA tensors were found in `llm_backbone`; "
+                    "falling back to full trainable checkpoint save."
+                )
+            else:
+                model_state_dicts = dict(model_state_dicts)
+                model_state_dicts["llm_backbone_lora"] = lora_state_dict
+                del model_state_dicts["llm_backbone"]
+                llm_backbone = self.vlm.module.llm_backbone
+                lora_config = llm_backbone.get_lora_config() if hasattr(llm_backbone, "get_lora_config") else None
+                checkpoint_metadata = {"llm_backbone_format": "lora-adapter-only"}
+                if lora_config is not None:
+                    checkpoint_metadata["lora_config"] = lora_config
         optimizer_state_dict = self.optimizer.state_dict()
 
         # Set Checkpoint Path =>> Embed *minimal* training statistics!
@@ -49,7 +67,10 @@ class DDPStrategy(TrainingStrategy):
             checkpoint_path = checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss={train_loss:.4f}.pt"
 
         # Save Checkpoint & Copy Latest to `latest-checkpoint.pt`
-        torch.save({"model": model_state_dicts, "optimizer": optimizer_state_dict}, checkpoint_path)
+        checkpoint_payload = {"model": model_state_dicts, "optimizer": optimizer_state_dict}
+        if checkpoint_metadata is not None:
+            checkpoint_payload.update(checkpoint_metadata)
+        torch.save(checkpoint_payload, checkpoint_path)
         shutil.copy(checkpoint_path, checkpoint_dir / "latest-checkpoint.pt")
 
     def run_setup(self, run_dir: Path, n_train_examples: int) -> None:

@@ -55,6 +55,7 @@ class FSDPStrategy(TrainingStrategy):
         enable_gradient_checkpointing: bool = True,
         enable_mixed_precision_training: bool = True,
         reduce_in_full_precision: bool = False,
+        save_lora_adapter_only: bool = False,
         mixed_precision_dtype: torch.dtype = torch.bfloat16,
         worker_init_fn: Optional[Callable[[int], None]] = None,
         sharding_strategy: str = "shard-grad-op",
@@ -75,6 +76,7 @@ class FSDPStrategy(TrainingStrategy):
             enable_gradient_checkpointing=enable_gradient_checkpointing,
             enable_mixed_precision_training=enable_mixed_precision_training,
             reduce_in_full_precision=reduce_in_full_precision,
+            save_lora_adapter_only=save_lora_adapter_only,
             mixed_precision_dtype=mixed_precision_dtype,
             worker_init_fn=worker_init_fn,
         )
@@ -102,7 +104,7 @@ class FSDPStrategy(TrainingStrategy):
         """Save a checkpoint to the `run_dir` only containing the state_dicts for trainable parameters by default."""
         assert isinstance(self.vlm, FSDP), "FSDPStrategy.save_checkpoint assumes VLM is already wrapped in FSDP!"
 
-        def _save_model_state_dicts(model_state_dicts: dict) -> None:
+        def _save_model_state_dicts(model_state_dicts: dict, checkpoint_metadata: Optional[dict] = None) -> None:
             if not overwatch.is_rank_zero():
                 return
 
@@ -112,8 +114,12 @@ class FSDPStrategy(TrainingStrategy):
             else:
                 checkpoint_path = checkpoint_dir / f"step-{global_step:06d}-epoch-{epoch:02d}-loss={train_loss:.4f}.pt"
 
+            checkpoint_payload = {"model": model_state_dicts}
+            if checkpoint_metadata is not None:
+                checkpoint_payload.update(checkpoint_metadata)
+
             # Save Checkpoint & Copy Latest to `latest-checkpoint.pt`
-            torch.save({"model": model_state_dicts}, checkpoint_path)
+            torch.save(checkpoint_payload, checkpoint_path)
             shutil.copy(checkpoint_path, checkpoint_dir / "latest-checkpoint.pt")
 
         # Fast path for align stage: only projector is trainable, so avoid materializing full VLM state_dict.
@@ -145,7 +151,36 @@ class FSDPStrategy(TrainingStrategy):
                     if key.startswith(mprefix := f"{mkey}."):
                         model_state_dicts[mkey][key.removeprefix(mprefix)] = param
 
-            _save_model_state_dicts(model_state_dicts)
+            checkpoint_metadata = None
+            if only_trainable and self.save_lora_adapter_only and "llm_backbone" in model_state_dicts:
+                llm_state_dict = model_state_dicts["llm_backbone"]
+                lora_state_dict = OrderedDict((k, v) for k, v in llm_state_dict.items() if "lora_" in k)
+                if len(lora_state_dict) == 0:
+                    overwatch.warning(
+                        "`save_lora_adapter_only=True` but no LoRA tensors were found in `llm_backbone`; "
+                        "falling back to full trainable checkpoint save."
+                    )
+                else:
+                    model_state_dicts = dict(model_state_dicts)
+                    model_state_dicts["llm_backbone_lora"] = lora_state_dict
+                    del model_state_dicts["llm_backbone"]
+
+                    llm_backbone = self.vlm.module.llm_backbone
+                    lora_config = (
+                        llm_backbone.get_lora_config()
+                        if hasattr(llm_backbone, "get_lora_config")
+                        else None
+                    )
+                    checkpoint_metadata = {"llm_backbone_format": "lora-adapter-only"}
+                    if lora_config is not None:
+                        checkpoint_metadata["lora_config"] = lora_config
+
+                    overwatch.info(
+                        f"Saving LoRA adapter-only checkpoint (lora_tensors={len(lora_state_dict)})",
+                        ctx_level=1,
+                    )
+
+            _save_model_state_dicts(model_state_dicts, checkpoint_metadata=checkpoint_metadata)
 
     def run_setup(self, run_dir: Path, n_train_examples: int) -> None:
         # Iteratively Assemble FSDP Wrapping Policy by fetching the wrapping policies for each backbone/constituent

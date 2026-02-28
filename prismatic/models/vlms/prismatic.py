@@ -100,14 +100,50 @@ class PrismaticVLM(VLM):
             arch_specifier=arch_specifier,
         )
 
-        # Load from Checkpoint (Custom --> should load both *projector* and *llm* weights)
-        model_state_dict = torch.load(pretrained_checkpoint, map_location="cpu")["model"]
-        assert (
-            "projector" in model_state_dict and "llm_backbone" in model_state_dict
-        ), "PrismaticVLM `from_pretrained` expects checkpoint with keys for `projector` AND `llm_backbone`!"
+        # Load from Checkpoint:
+        #   1) Full checkpoint format: `projector` + `llm_backbone`
+        #   2) LoRA adapter format:    `projector` + `llm_backbone_lora` + top-level `lora_config`
+        checkpoint = torch.load(pretrained_checkpoint, map_location="cpu")
+        model_state_dict = checkpoint["model"]
+        assert "projector" in model_state_dict, (
+            "PrismaticVLM `from_pretrained` expects checkpoint key `projector` in `checkpoint['model']`!"
+        )
 
         vlm.projector.load_state_dict(model_state_dict["projector"])
-        vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
+        if "llm_backbone" in model_state_dict:
+            vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone"])
+        elif "llm_backbone_lora" in model_state_dict:
+            if not hasattr(vlm.llm_backbone, "enable_lora"):
+                raise ValueError(
+                    f"LLM backbone `{vlm.llm_backbone.identifier}` does not implement `enable_lora(...)` "
+                    "required to load LoRA adapter checkpoints."
+                )
+            if getattr(vlm.llm_backbone, "inference_mode", False):
+                raise ValueError(
+                    "LoRA adapter checkpoints require a loaded base LLM (not an empty inference skeleton). "
+                    "Instantiate the LLM backbone with `inference_mode=False` before applying adapters."
+                )
+            lora_config = checkpoint.get("lora_config", None)
+            if lora_config is None:
+                raise ValueError(
+                    "LoRA adapter checkpoint missing top-level `lora_config`; cannot reconstruct adapter modules."
+                )
+            vlm.llm_backbone.enable_lora(
+                r=int(lora_config["r"]),
+                lora_alpha=int(lora_config["lora_alpha"]),
+                lora_dropout=float(lora_config["lora_dropout"]),
+                target_modules=lora_config["target_modules"],
+            )
+            load_result = vlm.llm_backbone.load_state_dict(model_state_dict["llm_backbone_lora"], strict=False)
+            if len(load_result.unexpected_keys) > 0:
+                raise ValueError(f"Unexpected LoRA checkpoint keys: {load_result.unexpected_keys}")
+        else:
+            raise ValueError(
+                "PrismaticVLM `from_pretrained` expects either `llm_backbone` or `llm_backbone_lora` in checkpoint."
+            )
+
+        # Inference loads should enable KV-cache regardless of how weights were materialized.
+        vlm.llm_backbone.llm.config.use_cache = True
 
         # Freeze Weights
         vlm.requires_grad_(False)

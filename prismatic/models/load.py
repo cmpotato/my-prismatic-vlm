@@ -87,13 +87,19 @@ def load(
         model_cfg["image_resize_strategy"],
     )
 
-    # Load LLM Backbone --> note `inference_mode = True` by default when calling `load()`
+    # If this run saved only LoRA adapters, we must load the base LLM weights from HF first.
+    use_lora_adapter_checkpoint = bool(
+        model_cfg.get("finetune_use_lora", False) and model_cfg.get("finetune_save_lora_adapter_only", False)
+    )
+    llm_inference_mode = not use_lora_adapter_checkpoint
+
+    # Load LLM Backbone
     overwatch.info(f"Loading Pretrained LLM [bold]{model_cfg['llm_backbone_id']}[/] via HF Transformers")
     llm_backbone, tokenizer = get_llm_backbone_and_tokenizer(
         model_cfg["llm_backbone_id"],
         llm_max_length=model_cfg.get("llm_max_length", 2048),
         hf_token=hf_token,
-        inference_mode=True,
+        inference_mode=llm_inference_mode,
     )
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)
