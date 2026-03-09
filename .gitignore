@@ -149,3 +149,4 @@ cache/
 data/
 runs/
 runs_smoke/
+.archive/

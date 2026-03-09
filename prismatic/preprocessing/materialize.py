@@ -52,19 +52,16 @@ def get_dataset_and_collator(
         )
         return dataset, collator
 
-    elif stage == "finetune":
-        annotation_json, image_dir = dataset_cfg.finetune_stage_components
-        dataset = dataset_cls(
-            dataset_root_dir / annotation_json,
-            dataset_root_dir / image_dir,
-            image_transform,
-            tokenizer,
-            prompt_builder_fn=prompt_builder_fn,
-        )
-        return dataset, collator
+    elif stage in {"finetune", "full-finetune"}:
+        if split == "train":
+            annotation_json, image_dir = dataset_cfg.finetune_stage_components
+        elif split == "val":
+            if dataset_cfg.finetune_val_stage_components is None:
+                raise ValueError("`finetune_val_stage_components` is not configured for this dataset!")
+            annotation_json, image_dir = dataset_cfg.finetune_val_stage_components
+        else:
+            raise ValueError(f"Split `{split}` is not supported for `{stage}` stage!")
 
-    elif stage == "full-finetune":
-        annotation_json, image_dir = dataset_cfg.finetune_stage_components
         dataset = dataset_cls(
             dataset_root_dir / annotation_json,
             dataset_root_dir / image_dir,

@@ -79,6 +79,24 @@
 如果你的数据集不在默认路径，可通过以下参数覆盖：
 - `--dataset.dataset_root_dir /your/dataset/root`
 
+### 5.0 本计划当前训练命令实际使用的数据集（align）
+
+本计划中的冒烟与正式 `align` 命令使用：
+- `--dataset.type llava-v15`
+- `--dataset.dataset_root_dir /home/max/my-prismatic-vlm/data`
+
+对应到本仓库当前配置，实际读取为：
+- 训练集：`/home/max/my-prismatic-vlm/data/download/llava-laion-cc-sbu-558k/chat_train.json`
+- 验证集：`/home/max/my-prismatic-vlm/data/download/llava-laion-cc-sbu-558k/chat_val.json`
+- 图片根目录：`/home/max/my-prismatic-vlm/data/download/llava-laion-cc-sbu-558k/`
+
+当前本地数据规模（用于 align）：
+- `chat_train.json`: 482,558 条
+- `chat_val.json`: 75,570 条
+
+说明：
+- `llava-v1.5-instruct/llava_v1_5_mix665k.json` 属于 `finetune` 阶段数据，不参与本计划的 `align` 训练。
+
 ### 5.1 使用 VQA 数据生成 Align 所需 `chat.json`（执行计划）
 
 你当前在 `/home/max/my-prismatic-vlm/data` 已准备 VQA 原始数据，目标是产出 `align` 阶段可直接读取的数据形态：
@@ -241,17 +259,75 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 scripts/pretrain.py \
 
 ## 8. 正式训练（多卡）
 
-冒烟测试通过后，保持同一套参数并拉长训练时长：
+冒烟测试通过后，使用以下正式训练命令（`align_max_steps=300000`，显式唯一 `run_id`，并切换为二阶段模型配置）：
 
 ```bash
 torchrun --standalone --nnodes 1 --nproc-per-node 8 scripts/pretrain.py \
   --stage align \
-  --model.type dinov3-qwen3vltext-align \
-  --model.align_max_steps 3000000 \
+  --model.type dinov3-qwen3vltext-2stage \
+  --model.align_max_steps 300000 \
   --dataset.type llava-v15 \
   --dataset.dataset_root_dir /home/max/my-prismatic-vlm/data \
+  --eval_every_n_steps 100 \
   --run_root_dir /home/max/my-prismatic-vlm/runs \
+  --run_id dinov3-qwen3vltext-2stage-align-s300k-x7-20260309-1900 \
   --trackers '["jsonl"]'
+```
+
+说明：
+- `align` 阶段本身按当前训练策略仍是每 100 step 保存一次 checkpoint。
+- `--eval_every_n_steps 100` 会每 100 step 额外计算一次 eval loss。
+- 建议在后续 `finetune` 阶段始终显式传 `--pretrained_checkpoint`，避免依赖自动发现路径（run 目录命名变化时容易失配）。例如：
+
+```bash
+--pretrained_checkpoint /home/max/my-prismatic-vlm/runs/dinov3-qwen3vltext-2stage-align-s300k-x7-20260309-1900/checkpoints/latest-checkpoint.pt
+```
+
+### 8.1 本任务实际生效超参数（对应上面的正式训练命令）
+
+```text
+stage: align
+nproc_per_node (torchrun): 8
+run_id: dinov3-qwen3vltext-2stage-align-s300k-x7-20260309-1900
+run_root_dir: /home/max/my-prismatic-vlm/runs
+seed: 7
+trackers: ('jsonl',)
+eval_every_n_steps: 100
+eval_max_batches: None
+
+[model]
+model.type: dinov3-qwen3vltext-2stage
+arch_specifier: gelu-mlp
+vision_backbone_id: dinov3-vit-l
+llm_backbone_id: qwen3vl-text-8b-instruct
+image_resize_strategy: resize-naive
+llm_max_length: 32768
+enable_gradient_checkpointing: True
+enable_mixed_precision_training: True
+reduce_in_full_precision: False
+
+[align optimization]
+align_epochs: 1
+align_max_steps: 300000
+align_global_batch_size: 256
+align_per_device_batch_size: 16
+grad_accumulation_steps (derived): 2
+align_learning_rate: 0.001
+align_weight_decay: 0.0
+align_max_grad_norm: 1.0
+align_lr_scheduler_type: linear-warmup+cosine-decay
+align_warmup_ratio: 0.03
+align_train_strategy: fsdp-shard-grad-op
+
+[dataset]
+dataset.type: llava-v15
+dataset_root_dir: /home/max/my-prismatic-vlm/data
+align_stage_components:
+  - download/llava-laion-cc-sbu-558k/chat_train.json
+  - download/llava-laion-cc-sbu-558k
+align_val_stage_components:
+  - download/llava-laion-cc-sbu-558k/chat_val.json
+  - download/llava-laion-cc-sbu-558k
 ```
 
 ## 9. 训练中监控项

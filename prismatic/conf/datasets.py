@@ -26,8 +26,8 @@ class DatasetConfig(ChoiceRegistry):
     align_stage_components: Tuple[Path, Path]       # Path to annotation file and images directory for `align` stage
     align_val_stage_components: Optional[Tuple[Path, Path]]  # Optional annotation/images for align validation
     finetune_stage_components: Tuple[Path, Path]    # Path to annotation file and images directory for `finetune` stage
-
     dataset_root_dir: Path                          # Path to dataset root directory; others paths are relative to root
+    finetune_val_stage_components: Optional[Tuple[Path, Path]] = None  # Optional annotation/images for finetune val
     # fmt: on
 
 
@@ -134,7 +134,11 @@ class CarPaint_Binary_Config(DatasetConfig):
         Path("download/llava-laion-cc-sbu-558k/"),
     )
     finetune_stage_components: Tuple[Path, Path] = (
-        Path("labeled_jpg/carpaint_finetune_chat.json"),
+        Path("labeled_jpg/carpaint_finetune_chat_train.json"),
+        Path("labeled_jpg/"),
+    )
+    finetune_val_stage_components: Optional[Tuple[Path, Path]] = (
+        Path("labeled_jpg/carpaint_finetune_chat_val.json"),
         Path("labeled_jpg/"),
     )
     dataset_root_dir: Path = Path("data")

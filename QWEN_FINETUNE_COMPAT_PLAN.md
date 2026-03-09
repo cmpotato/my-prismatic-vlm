@@ -418,7 +418,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --standalone --nnodes 1 --nproc-pe
 
 1. 固定参数
 - 8 卡训练：`--nproc-per-node 8`
-- 数据与模型保持当前链路：`dinov3-qwen3vltext-align` + `carpaint-binary`
+- 数据与模型保持当前链路：`dinov3-qwen3vltext-2stage` + `carpaint-binary`
 - LoRA 与轻量保存均开启：`finetune_use_lora=true`、`finetune_save_lora_adapter_only=true`
 - 总步数：`300000`
 - `per_device_batch_size=16`，配套 `global_batch_size=128`（8 卡下无梯度累积）
@@ -429,10 +429,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --standalone --nnodes 1 --nproc-pe
 
 ```bash
 torchrun --standalone --nnodes 1 --nproc-per-node 8 scripts/pretrain.py \
-  --model.type dinov3-qwen3vltext-align \
+  --model.type dinov3-qwen3vltext-2stage \
   --dataset.type carpaint-binary \
   --stage finetune \
-  --pretrained_checkpoint runs/dinov3-qwen3vltext-align+stage-align+x7/checkpoints/latest-checkpoint.pt \
+  --pretrained_checkpoint /home/max/my-prismatic-vlm/runs/dinov3-qwen3vltext-align+stage-align+x7/checkpoints/latest-checkpoint.pt \
   --model.finetune_use_lora true \
   --model.finetune_save_lora_adapter_only true \
   --model.finetune_max_steps 300000 \

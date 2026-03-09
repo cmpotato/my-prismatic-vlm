@@ -31,7 +31,6 @@ import draccus
 import torch
 import torch.distributed as dist
 import yaml
-from torch.utils.data import Subset
 
 from prismatic.conf import DatasetConfig, DatasetRegistry, ModelConfig, ModelRegistry
 from prismatic.models import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform, get_vlm
@@ -85,13 +84,8 @@ class PretrainConfig:
     # Evaluation Parameters (disabled if `eval_every_n_steps` is None)
     eval_every_n_steps: Optional[int] = 200
     eval_max_batches: Optional[int] = None
-    finetune_val_ratio: float = 0.2
-
     def __post_init__(self) -> None:
         """Set optimization parameters based on `stage` in {"align", "finetune"}."""
-        if not (0.0 <= self.finetune_val_ratio < 1.0):
-            raise ValueError("`finetune_val_ratio` must satisfy 0.0 <= ratio < 1.0")
-
         if self.stage == "align":
             self.epochs = self.model.align_epochs
             self.max_steps = self.model.align_max_steps
@@ -235,33 +229,22 @@ def pretrain(cfg: PretrainConfig) -> None:
                 )
 
         elif cfg.stage.endswith("finetune"):
-            if cfg.finetune_val_ratio <= 0:
-                overwatch.warning("`finetune_val_ratio <= 0`; skipping finetune validation split.")
+            if cfg.dataset.finetune_val_stage_components is None:
+                overwatch.warning(
+                    "Validation is enabled, but `dataset.finetune_val_stage_components` is not set; skipping val loss."
+                )
             else:
-                n_total = len(train_dataset)
-                if n_total < 2:
-                    overwatch.warning(
-                        f"Dataset has only {n_total} example(s); skipping finetune validation split."
-                    )
-                else:
-                    n_val = int(n_total * cfg.finetune_val_ratio)
-                    if n_val <= 0:
-                        n_val = 1
-                    if n_val >= n_total:
-                        n_val = n_total - 1
-
-                    split_generator = torch.Generator()
-                    split_generator.manual_seed(cfg.seed)
-                    indices = torch.randperm(n_total, generator=split_generator).tolist()
-                    val_indices, train_indices = indices[:n_val], indices[n_val:]
-
-                    full_train_dataset = train_dataset
-                    train_dataset = Subset(full_train_dataset, train_indices)
-                    val_dataset = Subset(full_train_dataset, val_indices)
-                    overwatch.info(
-                        f"Created finetune train/val split from training data "
-                        f"(train={len(train_dataset)}, val={len(val_dataset)}, val_ratio={cfg.finetune_val_ratio:.2f})"
-                    )
+                overwatch.info(f"Creating Validation Dataset `{cfg.dataset.dataset_id}` => Stage: `{cfg.stage}`")
+                val_dataset, _ = get_dataset_and_collator(
+                    cfg.stage,
+                    cfg.dataset,
+                    image_transform,
+                    tokenizer,
+                    prompt_builder_fn=llm_backbone.prompt_builder_fn,
+                    default_image_resolution=vision_backbone.default_image_resolution,
+                    padding_side=tokenizer.padding_side,
+                    split="val",
+                )
 
     # Create Train Strategy
     overwatch.info(f"Initializing Train Strategy `{cfg.train_strategy}`")
