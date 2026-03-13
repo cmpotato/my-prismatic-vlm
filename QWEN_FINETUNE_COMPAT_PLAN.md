@@ -432,7 +432,7 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 scripts/pretrain.py \
   --model.type dinov3-qwen3vltext-2stage \
   --dataset.type carpaint-binary \
   --stage finetune \
-  --pretrained_checkpoint /home/max/my-prismatic-vlm/runs/dinov3-qwen3vltext-align+stage-align+x7/checkpoints/latest-checkpoint.pt \
+  --pretrained_checkpoint /home/max/my-prismatic-vlm/runs/dinov3-qwen3vltext-2stage-align-s300k-x7-20260309-1900/best-val-step-013100.pt \
   --model.finetune_use_lora true \
   --model.finetune_save_lora_adapter_only true \
   --model.finetune_max_steps 300000 \
@@ -441,5 +441,5 @@ torchrun --standalone --nnodes 1 --nproc-per-node 8 scripts/pretrain.py \
   --model.finetune_max_grad_norm 0 \
   --trackers '["jsonl"]' \
   --run_root_dir /home/max/my-prismatic-vlm/runs \
-  --run_id carpaint-qwen-lora-ft-300k-bs128-pd16
+  --run_id carpaint-qwen-lora-ft-20260312-bestvalalign
 ```
