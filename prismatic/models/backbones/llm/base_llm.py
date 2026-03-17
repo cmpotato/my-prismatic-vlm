@@ -42,6 +42,8 @@ class LLMBackbone(nn.Module, ABC):
         # Instance attributes for an LLM Backbone
         self.llm: PreTrainedModel = None
         self.tokenizer: PreTrainedTokenizerBase = None
+        self.image_token = "<image>"
+        self.image_token_id: Optional[int] = None
 
     def get_tokenizer(self) -> PreTrainedTokenizerBase:
         return self.tokenizer

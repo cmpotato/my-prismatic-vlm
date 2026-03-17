@@ -148,6 +148,7 @@ class TrainingStrategy(ABC):
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         pixel_values=batch["pixel_values"],
+                        image_attention_mask=batch["image_attention_mask"],
                         labels=batch["labels"],
                         multimodal_indices=batch["multimodal_indices"],
                     )
@@ -177,7 +178,7 @@ class TrainingStrategy(ABC):
         seed: int = 7,
     ) -> None:
         """Run the training loop for the given `dataset` and `collator`; log losses, results to `metrics`"""
-        checkpoint_every_steps = 200 if "finetune" in stage else 100
+        checkpoint_every_steps = 100
 
         if "finetune" in stage and batch_construction_strategy == "split-modality":
             # Instantiate the split-modality sampler; if you want to extend with other batch construction schemes,
@@ -270,6 +271,7 @@ class TrainingStrategy(ABC):
                             input_ids=batch["input_ids"],
                             attention_mask=batch["attention_mask"],
                             pixel_values=batch["pixel_values"],
+                            image_attention_mask=batch["image_attention_mask"],
                             labels=batch["labels"],
                             multimodal_indices=batch["multimodal_indices"],
                         )

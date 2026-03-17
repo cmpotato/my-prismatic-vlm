@@ -1,13 +1,37 @@
 # 多图交错输入改动计划
 
+正式训练命令
+
+```
+torchrun --standalone --nnodes 1 --nproc-per-node 8 scripts/pretrain.py \
+  --model.type dinov3-qwen3vltext-2stage \
+  --dataset.type carpaint-binary \
+  --dataset.dataset_root_dir data \
+  --dataset.finetune_stage_components '["jit_diff/carpaint_finetune_chat_train.json", "jit_diff/"]' \
+  --dataset.finetune_val_stage_components '["jit_diff/carpaint_finetune_chat_val.json", "jit_diff/"]' \
+  --stage finetune \
+  --pretrained_checkpoint /home/max/my-prismatic-vlm/runs/dinov3-qwen3vltext-2stage-align-s300k-x7-20260309-1900/best-val-step-013100.pt \
+  --model.finetune_use_lora true \
+  --model.finetune_save_lora_adapter_only true \
+  --model.finetune_global_batch_size 64 \
+  --model.finetune_per_device_batch_size 8 \
+  --model.finetune_max_steps 100000 \
+  --model.finetune_max_grad_norm 0 \
+  --eval_every_n_steps 100 \
+  --trackers '["jsonl"]' \
+  --run_root_dir /home/max/my-prismatic-vlm/runs \
+  --run_id carpaint-jitdiff-3img-lora-ft
+```
+
 ## 目标
 
 在这个仓库里实现**方案二**：多张图像与文本中的多个 `<image>` 占位符一一对齐，模型执行真正的图文交错条件建模，而不是把所有图像 patch 简单拼成一整段统一的视觉块。
 
-这份计划有意聚焦在当前车漆任务正在使用的 **finetune 链路**：
+这份计划有意聚焦在当前车漆任务正在使用的 **唯一目标组合**：
 
 - `scripts/pretrain.py`
 - `stage=finetune`
+- `DinoV3ViTBackbone`
 - `PrismaticVLM`
 - `Qwen3VLTextLLMBackbone`
 - 当前基于 prompt builder 的对话格式化链路
@@ -82,26 +106,23 @@ USER: compare <image> with <image> and answer ...
 
 ## 建议的实施范围
 
-### 第一阶段范围
-
-先让方案二在以下链路下正确工作：
+只保留一个实施阶段，范围固定为：
 
 - `stage=finetune`
+- `DinoV3ViTBackbone`
 - `Qwen3VLTextLLMBackbone`
 - `PurePromptBuilder`
 - 训练和评估循环
 - `generate()` 和 `generate_batch()` 的多图推理
 
-### 第二阶段范围
+不在这一轮里考虑：
 
-再把“保留占位符”的逻辑推广到其他 prompt builder：
+- 其他 vision backbone
+- 其他 LLM family
+- 其他 prompt builder
+- `align` 阶段
 
-- `LLaMa2ChatPromptBuilder`
-- `MistralInstructPromptBuilder`
-- `PhiPromptBuilder`
-- `VicunaV15ChatPromptBuilder`
-
-这样做的原因是：先保证当前车漆/Qwen 微调主链路稳定，而不是一开始就对全仓库所有模型家族做并行改造。
+这样做的原因是：当前分支目标不是做全仓库通用多图框架，而是先把正在用的 `DINOv3 + Qwen3VL textmodel` 微调链路完整打通。
 
 ## 必要的内部接口变化
 
@@ -194,13 +215,13 @@ USER: compare <image> with <image> and answer ...
 
 建议范围：
 
-- 第一阶段：先改 `PurePromptBuilder`
-- 第二阶段：再同步改其他 prompt builder
+- 仅修改 `PurePromptBuilder`
 
 原因：
 
 - 方案二要求占位符位置必须穿透到 tokenization 后
 - 当前 builder 的行为从设计上就与方案二冲突
+- 当前目标组合只走 `PurePromptBuilder`
 
 ### 4. `prismatic/preprocessing/datasets/datasets.py`
 
@@ -457,9 +478,9 @@ USER: compare <image> with <image> and answer ...
 
 加 special token 会改变 tokenizer 长度和 embedding 尺寸。模型构建和 checkpoint 加载必须严格保持一致。
 
-### 3. 不同 prompt builder 的行为不一致
+### 3. 当前实现是组合定制，不是全仓库通用能力
 
-仓库里有多套 prompt builder，而且当前都在删 `<image>`。如果第一阶段只改 Qwen/Pure 路径，必须在设计和实现上明确这一点，避免误以为全仓库已经统一支持。
+这一轮只覆盖 `DINOv3 + Qwen3VL textmodel + PurePromptBuilder`。如果后续切到其他 backbone 或 prompt builder，默认不能认为多图交错逻辑已经自动成立。
 
 ### 4. 主前向路径之外仍有隐藏的单图假设
 
@@ -476,7 +497,7 @@ USER: compare <image> with <image> and answer ...
 
 ## 第一版 PR 建议的最终形态
 
-第一版 PR 应该做到：**对当前在用的 Qwen finetune 链路完整可用**，而不是一开始就对所有模型家族做到全局完备。
+第一版 PR 应该做到：**对当前在用的 `DINOv3 + Qwen finetune` 链路完整可用**，而不是一开始就对所有模型家族做到全局完备。
 
 建议 PR 范围：
 
@@ -490,3 +511,484 @@ USER: compare <image> with <image> and answer ...
 - 单图 / 双图 smoke test
 
 这是在工程上仍然诚实、且变动范围相对最小的一种方案二实现路径。
+
+## 附录：多图适配核心代码审查总结
+
+### 审查范围
+
+这部分内容是对当前分支中“多图输入适配”核心代码修改的中文审查总结，审查范围限定在当前已经收敛过的目标路径：
+
+- 视觉 backbone：`DinoV3ViTBackbone`
+- 文本 backbone：`Qwen3VLTextLLMBackbone`
+- 训练阶段：`finetune`
+- prompt builder 路径：`PurePromptBuilder`
+
+本次审查覆盖的 git 跟踪文件包括：
+
+- `prismatic/models/backbones/llm/base_llm.py`
+- `prismatic/models/backbones/llm/prompting/base_prompter.py`
+- `prismatic/models/backbones/llm/qwen3vl_text.py`
+- `prismatic/models/vlms/base_vlm.py`
+- `prismatic/models/vlms/prismatic.py`
+- `prismatic/preprocessing/datasets/datasets.py`
+- `prismatic/training/strategies/base_strategy.py`
+- `prismatic/util/data_utils.py`
+
+审查目标不是简单罗列改动，而是判断这些改动在当前仓库中的逻辑是否闭环、是否正确、以及后续还存在哪些风险。
+
+### 总体结论
+
+当前这版多图适配，对于目标路径是成立的，核心逻辑是正确的。
+
+这版实现做的不是“把多张图简单拼到 BOS 后面”，而是：
+
+- 在文本里保留真实 `<image>` 占位符
+- 数据集支持每条样本携带多张图
+- collator 用 `image_attention_mask` 显式标记每条样本哪些图像槽位有效
+- `PrismaticVLM.forward()` 根据 tokenized 后的 `<image>` 位置，把对应图像的 patch block 插入到对应位置
+
+这套设计和“方案二”的目标一致，也就是：
+
+- 图像顺序由 prompt 中的 `<image>` 位置决定
+- 图像与文本是按占位符位置交错对齐，而不是统一插到开头
+
+当前代码已经支持：
+
+- 旧格式单图样本：`image`
+- 新格式多图样本：`images`
+- 图像数与 `<image>` 数量严格一致性校验
+- 训练前向中的多图交错插入
+- 推理接口中的多图输入
+
+从工程角度看，这次改动是结构完整的，不是只改了 dataset 或只改了模型前向中的一处。
+
+### 设计意图与实现方向
+
+在修改前，仓库的单图假设存在于几个关键层：
+
+- prompt builder 会直接删除 `<image>`
+- finetune dataset 每条样本只读取一张图
+- collator 只会堆叠每样本一张图
+- `PrismaticVLM.forward()` 默认只在 BOS 后插一段视觉 patch
+
+当前实现把这套单图约束改成了新的链路契约：
+
+1. `<image>` 必须保留到 tokenization 之后。
+2. 每条样本可以携带 0、1 或多张图。
+3. 每张图先独立过 vision backbone 和 projector。
+4. 每个 `<image>` token 都被替换成对应那一张图的 patch block。
+5. patch 对应的位置不参与语言模型 loss。
+
+对当前 Qwen 路径来说，这就是正确的多图交错语义。
+
+### 分文件总结与正确性判断
+
+#### 1. `prismatic/models/backbones/llm/base_llm.py`
+
+相关位置：
+
+- [base_llm.py](/home/max/my-prismatic-vlm/prismatic/models/backbones/llm/base_llm.py#L45)
+
+修改内容：
+
+- 在抽象 LLM backbone 基类中新增：
+  - `self.image_token = "<image>"`
+  - `self.image_token_id`
+
+为什么这样改是对的：
+
+- `PrismaticVLM.forward()` 需要知道 tokenized 之后哪个 token id 代表图像占位符。
+- 这个信息属于 tokenizer / LLM backbone 范畴，不应该硬编码在 VLM 主体里。
+- 放在基类里，能够明确多图对齐的通用契约。
+
+结论：
+
+- 改动很小，但位置是对的。
+- 这一步把“图像占位符”从隐式字符串，提升成了显式模型契约。
+
+#### 2. `prismatic/models/backbones/llm/prompting/base_prompter.py`
+
+相关位置：
+
+- [base_prompter.py](/home/max/my-prismatic-vlm/prismatic/models/backbones/llm/prompting/base_prompter.py#L42)
+
+修改内容：
+
+- `PurePromptBuilder.add_turn()` 不再删除 `<image>`，改为仅做 `strip()`
+
+为什么这样改是对的：
+
+- 如果这里继续删 `<image>`，那么后面的 tokenizer、dataset、forward 再怎么改都无法知道图像该插到哪里。
+- 多图交错的第一前提就是 `<image>` 必须从 prompt 构造一路保留下来。
+
+结论：
+
+- 这是当前路径里最关键的启用性改动之一。
+- 当前范围只覆盖 `PurePromptBuilder`，这个边界是明确且合理的。
+
+#### 3. `prismatic/models/backbones/llm/qwen3vl_text.py`
+
+相关位置：
+
+- [qwen3vl_text.py](/home/max/my-prismatic-vlm/prismatic/models/backbones/llm/qwen3vl_text.py#L101)
+- [qwen3vl_text.py](/home/max/my-prismatic-vlm/prismatic/models/backbones/llm/qwen3vl_text.py#L116)
+- [qwen3vl_text.py](/home/max/my-prismatic-vlm/prismatic/models/backbones/llm/qwen3vl_text.py#L135)
+- [qwen3vl_text.py](/home/max/my-prismatic-vlm/prismatic/models/backbones/llm/qwen3vl_text.py#L153)
+
+修改内容：
+
+- tokenizer 初始化后检查 `<image>` 是否已经是独立 token
+- 若不存在，则把 `<image>` 注册成 additional special token
+- 若词表长度发生变化，则 resize token embeddings
+- 记录 `image_token_id`
+- 如果 `<image>` 最终仍被解析成 `unk_token_id`，则直接报错
+
+为什么这样改是对的：
+
+- 方案二要求 `<image>` 在 tokenization 后仍能稳定定位。
+- 如果 `<image>` 只是普通字符串片段，被拆成多个 subtoken，那么后续对齐逻辑会变脆弱甚至失效。
+- 因此把 `<image>` 注册成真正的 special token 是正确做法。
+- 增加 special token 后同步 resize embedding 是必须步骤，否则词表和 embedding 尺寸不一致。
+
+结论：
+
+- 这部分实现是必要且正确的。
+- 失败路径也设计得清楚：如果 `<image>` 没注册成功，会直接报错，而不是静默坏掉。
+
+#### 4. `prismatic/preprocessing/datasets/datasets.py`
+
+相关位置：
+
+- [datasets.py](/home/max/my-prismatic-vlm/prismatic/preprocessing/datasets/datasets.py#L123)
+- [datasets.py](/home/max/my-prismatic-vlm/prismatic/preprocessing/datasets/datasets.py#L139)
+- [datasets.py](/home/max/my-prismatic-vlm/prismatic/preprocessing/datasets/datasets.py#L187)
+- [datasets.py](/home/max/my-prismatic-vlm/prismatic/preprocessing/datasets/datasets.py#L214)
+
+修改内容：
+
+- 新增 `_extract_image_paths()`：
+  - 兼容旧的 `image`
+  - 也支持新的 `images`
+- 新增 `_count_image_placeholders()`
+- `__getitem__()` 中：
+  - 读取多张图
+  - 校验图像数量必须和对话中的 `<image>` 数量一致
+  - 支持把多张 transform 输出堆叠成 tensor 或 dict
+- `get_modality_lengths()` 从只看 `"image" in example` 改成用统一抽取逻辑判断
+
+为什么这样改是对的：
+
+- 多图适配从数据层开始就必须升级协议。
+- `image` 与 `images` 双兼容保证了对旧数据的回退兼容，不会强行打断已有链路。
+- 最重要的是“图像数 == 占位符数”这个约束被放在 dataset 层就开始检查，这可以在最早阶段拦住脏数据。
+
+结论：
+
+- 数据层改法是稳妥的。
+- 这一步避免了最危险的一类隐式错误：样本看似能读，但图像顺序和文本占位符不一致。
+
+补充判断：
+
+- 这里的 `get_modality_lengths()` 仍然只统计文本词数，没有把多图序列膨胀算进去。
+- 这不影响功能正确性，但会影响 sampler 的长度估计质量。
+
+#### 5. `prismatic/util/data_utils.py`
+
+相关位置：
+
+- [data_utils.py](/home/max/my-prismatic-vlm/prismatic/util/data_utils.py#L28)
+- [data_utils.py](/home/max/my-prismatic-vlm/prismatic/util/data_utils.py#L52)
+- [data_utils.py](/home/max/my-prismatic-vlm/prismatic/util/data_utils.py#L114)
+
+修改内容：
+
+- collator 支持多图 batch
+- 对 tensor 路径，输出 shape 变为：
+  - `[B, M, C, H, W]`
+- 对 dict 路径，输出变为：
+  - `dict[key] -> [B, M, ...]`
+- 新增 `image_attention_mask`，shape 为：
+  - `[B, M]`
+- 对 unimodal 样本仍用 dummy image，但 mask 全为 false
+
+为什么这样改是对的：
+
+- batch 内样本的图片数不固定，所以必须按图片轴做 padding。
+- 一旦做 padding，就必须显式告诉下游哪些图片槽位是真图、哪些是 pad 图。
+- `image_attention_mask` 正是这个作用。
+- 对 unimodal 样本统一沿用同一个 batch 协议，减少了模型前向中的分支复杂度。
+
+结论：
+
+- 这部分设计是正确的，而且和后续 `PrismaticVLM.forward()` 的 flatten 逻辑完全配套。
+
+#### 6. `prismatic/training/strategies/base_strategy.py`
+
+相关位置：
+
+- [base_strategy.py](/home/max/my-prismatic-vlm/prismatic/training/strategies/base_strategy.py#L147)
+- [base_strategy.py](/home/max/my-prismatic-vlm/prismatic/training/strategies/base_strategy.py#L271)
+- [base_strategy.py](/home/max/my-prismatic-vlm/prismatic/training/strategies/base_strategy.py#L227)
+
+修改内容：
+
+- 训练和验证前向都把 `image_attention_mask` 传入模型
+
+为什么这样改是对的：
+
+- 仅仅在 train 传 mask、eval 不传，或者反过来，都会导致行为不一致。
+- 当前实现使 train/eval 共用同一 forward 契约，符合预期。
+
+结论：
+
+- 这是必须的调用链打通改动，方向正确。
+
+补充说明：
+
+- 当前 validation dataloader 复用了 `per_device_batch_size`。
+- 这也是后续正式大 batch 运行时在 eval 阶段更容易爆显存的一个原因。
+
+#### 7. `prismatic/models/vlms/base_vlm.py`
+
+相关位置：
+
+- [base_vlm.py](/home/max/my-prismatic-vlm/prismatic/models/vlms/base_vlm.py#L82)
+
+修改内容：
+
+- 抽象 `forward()` 签名增加 `image_attention_mask`
+
+为什么这样改是对的：
+
+- 新字段既然是核心 forward 契约的一部分，就应该上升到抽象接口层。
+- 不应该只在具体实现里偷偷增加参数。
+
+结论：
+
+- 这是正确的接口层同步。
+
+#### 8. `prismatic/models/vlms/prismatic.py`
+
+这是本轮改动的核心。
+
+相关位置：
+
+- `_flatten_multimodal_pixel_values()`： [prismatic.py](/home/max/my-prismatic-vlm/prismatic/models/vlms/prismatic.py#L286)
+- `_build_interleaved_sequences()`： [prismatic.py](/home/max/my-prismatic-vlm/prismatic/models/vlms/prismatic.py#L303)
+- 主 `forward()`： [prismatic.py](/home/max/my-prismatic-vlm/prismatic/models/vlms/prismatic.py#L387)
+- `prepare_inputs_for_generation()`： [prismatic.py](/home/max/my-prismatic-vlm/prismatic/models/vlms/prismatic.py#L520)
+- `generate_batch()`： [prismatic.py](/home/max/my-prismatic-vlm/prismatic/models/vlms/prismatic.py#L555)
+- `generate()`： [prismatic.py](/home/max/my-prismatic-vlm/prismatic/models/vlms/prismatic.py#L649)
+
+修改内容：
+
+- 先根据 `image_attention_mask` 提取 batch 中所有真实图像，并展平成视觉 backbone 可处理的连续图像 batch
+- 每张图独立经过 vision backbone 和 projector，得到一段 patch block
+- 对每个多模态样本：
+  - 找出 tokenized 后 `<image>` 的位置
+  - 检查占位符数量是否与该样本图像数一致
+  - 依次用对应图像 patch block 替换对应占位符
+- 图像 patch block 对应位置的 label 统一设为 `IGNORE_INDEX`
+- 因为替换后各样本长度不再相同，所以再通过 `pad_sequence` 拼回一个 batch
+- 同时把 generation 路径也同步改成支持多图
+
+为什么这样改是对的：
+
+1. 只对真实图像做视觉编码  
+   通过 `image_attention_mask` 先过滤掉 pad 图像，避免无效计算，这是正确的。
+
+2. 用 placeholder 位置驱动插入  
+   这正是方案二的定义。图像不是统一塞到 BOS 后，而是由 `<image>` 的文本位置决定。
+
+3. patch 位置不参与语言建模 loss  
+   图像 patch 不是文本 token，对这些位置设 `IGNORE_INDEX` 是标准做法。
+
+4. 允许不同样本替换后序列长度不同  
+   多图交错后，每条样本长度天然可变，用 `pad_sequence` 恢复批处理是合理的。
+
+5. generation 路径同步升级  
+   如果只改训练前向，不改 generation，那么推理会和训练契约不一致。当前实现把这一点补上了。
+
+结论：
+
+- 这部分是当前多图适配最核心、也是最关键正确的一段代码。
+- 从逻辑闭环上看，数据、掩码、token 位置、视觉特征和 loss 屏蔽之间是自洽的。
+
+需要明确的一点：
+
+- 当前 `generate_batch()` 仍然是逐样本循环调用 `super().generate()`，不是一次性真正矢量化批量生成。
+- 这不影响正确性，但会影响效率。
+
+### 正确性论证
+
+当前实现最重要的正确性来自于整条数据契约闭环：
+
+1. Dataset 读取多图样本。
+2. Dataset 校验图像数和 `<image>` 数量一致。
+3. Collator 对图片轴做 padding，并输出 `image_attention_mask`。
+4. Forward 根据 mask 只提取真实图像。
+5. Forward 在 tokenized 后再次检查 `<image>` 数量和图像数一致。
+6. Forward 逐个占位符插入对应图像的 patch block。
+7. 图像 patch 对应位置不计入 loss。
+8. 最终 LLM 收到的是已经完成对齐的 fused embeddings / attention / labels。
+
+这条链路中没有缺关键步骤，因此从工程逻辑上看是完整的。
+
+尤其重要的是，这版实现避免了两种常见错误：
+
+- 图像数和占位符数不一致却静默继续训练
+- padded image slot 被误当成真实图像送进模型
+
+### 已有验证证据
+
+#### 1. 静态验证
+
+已对当前改动文件做过 `py_compile` 检查，语法通过。
+
+#### 2. 成功的三图 smoke run
+
+`runs_smoke/carpaint-jitdiff-3img-smoke` 已经成功跑通了一次真实的 train + val：
+
+- [carpaint-jitdiff-3img-smoke.jsonl](/home/max/my-prismatic-vlm/runs_smoke/carpaint-jitdiff-3img-smoke/carpaint-jitdiff-3img-smoke.jsonl)
+
+关键结果：
+
+- Train Examples：`1550`
+- Val Examples：`450`
+- Step 1 Train Loss：`8.0859375`
+- Step 1 Val Loss：`8.23828125`
+- Val Batches：`8`
+
+这说明：
+
+- 三图 JSON 被 dataset 正确读取
+- collator 正确构造了多图 batch
+- `PrismaticVLM.forward()` 的交错插入路径能完整跑通
+- eval 路径也能使用同样契约运行
+
+#### 3. 大 batch 正式 run 的失败归因
+
+后续正式 run 失败不是多图逻辑错误，而是显存问题：
+
+- 失败日志见 [output.txt](/home/max/output.txt#L1632)
+- 直接异常是 `torch.OutOfMemoryError`
+- 发生位置在 Qwen loss 计算阶段
+- 当时配置使用了更激进的：
+  - `per_device_batch_size=16`
+  - `global_batch_size=128`
+
+因此应把这个失败解释为：
+
+- 代码路径是可运行的
+- 但三图输入把显存和序列长度压力显著放大了
+- 单图时期的 batch 配置不能直接照搬
+
+### 主要剩余风险
+
+#### 1. sampler 长度估计仍偏单图假设
+
+当前：
+
+- `FinetuneDataset.get_modality_lengths()` 仍然只统计文本词数
+- `SplitModalitySampler` 仍按旧思路估计长度
+
+影响：
+
+- 功能是对的
+- 但 batch packing 和 OOM 预估会不够精确
+
+#### 2. 当前支持范围是定制组合，不是全仓库通用能力
+
+本轮只覆盖：
+
+- Qwen3VLText
+- PurePromptBuilder
+- 当前这条 finetune 链路
+
+影响：
+
+- 不能把这次改动表述成“仓库已经全面支持多图”
+- 换其他 prompt builder 或其他 LLM backbone 时，默认不能假设同样成立
+
+#### 3. eval batch size 仍继承 train batch size
+
+当前验证 dataloader 直接复用 `per_device_batch_size`。
+
+影响：
+
+- 训练可能能跑，eval 先爆
+- 正式 run 中已经出现了这个现象
+
+#### 4. 多图天然带来上下文长度与显存膨胀
+
+每增加一张图，都会增加一整段视觉 patch block。
+
+影响：
+
+- 这不是实现 bug，而是这个方案天然的代价
+- 配置必须更保守，尤其是 `per_device_batch_size`
+
+### 后续建议
+
+1. 保留当前多图核心实现，不建议回退成“统一插到 BOS 后”的简化版本。  
+   当前实现才真正满足方案二。
+
+2. 正式训练默认采用保守 batch 配置。  
+   对三图版本，优先使用已经 smoke 证明可运行的小 batch。
+
+3. 下一步最值得补的是 sampler 长度估计。  
+   这会改善 batch 组织质量和 OOM 可预测性。
+
+4. 如有必要，可单独引入更小的 eval batch size。  
+   这能降低评估阶段的显存风险。
+
+5. 如果后续要支持更广泛的模型组合，应把其他 prompt builder / backbone 作为新的独立工作项。  
+   不建议在当前分支里默认外推。
+
+### 最终判断
+
+对于当前限定的 `DINOv3 + Qwen3VLText + finetune + PurePromptBuilder` 组合，这次多图适配的核心代码改动是成立的。
+
+最关键的一点，即：
+
+- 让多个 `<image>` 占位符在 `PrismaticVLM.forward()` 中各自替换成对应图像的 patch block
+
+已经在数据层、collator、训练前向、验证前向和 generation 接口层面形成了闭环。
+
+已经跑通的三图 smoke run 说明这套逻辑不仅静态上自洽，而且动态上能实际执行。
+
+当前暴露出来的主要问题是大 batch 配置下的显存压力，而不是多图交错实现本身的逻辑错误。
+
+## 阶段性完成日志
+
+日期：2026-03-17
+
+本阶段可以视为“当前目标范围内的多图适配代码基本完成”，范围限定为：
+
+- `DINOv3 + Qwen3VLText + finetune + PurePromptBuilder`
+- 当前 `jit_diff` 三图车漆数据链路
+- 训练、验证、推理三条主路径
+
+本阶段完成内容：
+
+- `FinetuneDataset` 支持 `images` 多图字段，并校验 `images` 数量与 `<image>` 占位符数量一致
+- `PaddedCollatorForLanguageModeling` 支持多图 batch，并显式输出 `image_attention_mask`
+- `PrismaticVLM.forward()` 支持按 `<image>` token 位置交错插入对应图像 patch block
+- `generate()` / `generate_batch()` 支持单样本多图输入
+- `TrainingStrategy` 训练与验证路径透传多图所需字段
+- `Qwen3VLTextLLMBackbone` 为 `<image>` 注册专用 token，支撑多图占位符对齐
+- 保留 `PurePromptBuilder` 中的 `<image>`，使多图占位符可以从数据层一路传递到模型前向
+- checkpoint 保存间隔已调整为每 `100` step 保存一次
+
+阶段性验证结果：
+
+- 三图 smoke run 已跑通，说明训练前向、验证前向与 checkpoint 保存链路可执行
+- 当前限定路径下，单图旧格式与多图新格式均可被现有代码处理
+- 三图数据集的图像数与 `<image>` 数量检查通过
+- 当前三图样本不会触发序列长度截断
+
+当前结论：
+
+- 多图适配核心逻辑未发现明显实现错误
+- 当前分支可以视为“多图适配阶段性完成”
+- 后续若继续优化，重点应转向训练目标、prompt/输出格式、类别偏置与评估口径，而不是多图输入管线本身

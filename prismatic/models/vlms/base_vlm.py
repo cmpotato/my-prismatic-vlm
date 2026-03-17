@@ -84,6 +84,7 @@ class VLM(nn.Module, GenerationMixin, ABC):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.FloatTensor] = None,
+        image_attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,

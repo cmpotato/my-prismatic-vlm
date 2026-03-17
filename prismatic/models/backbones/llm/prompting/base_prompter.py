@@ -41,7 +41,7 @@ class PurePromptBuilder(PromptBuilder):
 
     def add_turn(self, role: str, message: str) -> str:
         assert (role == "human") if (self.turn_count % 2 == 0) else (role == "gpt")
-        message = message.replace("<image>", "").strip()
+        message = message.strip()
 
         if (self.turn_count % 2) == 0:
             human_message = self.wrap_human(message)

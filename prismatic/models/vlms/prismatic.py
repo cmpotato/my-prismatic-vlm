@@ -18,6 +18,7 @@ from typing import Callable, Dict, List, Optional, Type, Union
 import torch
 from PIL import Image
 from torch.distributed.fsdp.wrap import _module_wrap_policy, _or_policy
+from torch.nn.utils.rnn import pad_sequence
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from prismatic.models.backbones.llm import LLMBackbone
@@ -282,6 +283,103 @@ class PrismaticVLM(VLM):
             ],
         )
 
+    @staticmethod
+    def _flatten_multimodal_pixel_values(
+        pixel_values: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        image_attention_mask: torch.Tensor,
+        multimodal_indices: torch.Tensor,
+    ) -> tuple[Union[torch.Tensor, Dict[str, torch.Tensor]], List[int]]:
+        selected_image_mask = image_attention_mask[multimodal_indices]
+        image_counts = selected_image_mask.sum(dim=1).tolist()
+
+        if isinstance(pixel_values, dict):
+            selected_pixel_values = {key: value[multimodal_indices] for key, value in pixel_values.items()}
+            flattened_pixel_values = {key: value[selected_image_mask] for key, value in selected_pixel_values.items()}
+        else:
+            flattened_pixel_values = pixel_values[multimodal_indices][selected_image_mask]
+
+        return flattened_pixel_values, image_counts
+
+    def _build_interleaved_sequences(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.Tensor,
+        input_embeddings: torch.Tensor,
+        projected_patch_embeddings: torch.Tensor,
+        multimodal_indices: torch.Tensor,
+        image_counts: List[int],
+        labels: Optional[torch.LongTensor] = None,
+    ) -> tuple[Dict[int, torch.Tensor], Dict[int, torch.Tensor], Optional[Dict[int, torch.Tensor]]]:
+        if self.llm_backbone.image_token_id is None:
+            raise ValueError("LLM backbone is missing `image_token_id`; cannot build interleaved multimodal sequence.")
+
+        multimodal_embeddings: Dict[int, torch.Tensor] = {}
+        multimodal_attention_masks: Dict[int, torch.Tensor] = {}
+        multimodal_labels: Optional[Dict[int, torch.Tensor]] = {} if labels is not None else None
+        patch_offset = 0
+
+        for mm_idx, batch_idx in enumerate(multimodal_indices.tolist()):
+            n_images = int(image_counts[mm_idx])
+            if n_images <= 0:
+                raise ValueError(f"Multimodal sample at batch index {batch_idx} has no valid images.")
+
+            seq_len = int(attention_mask[batch_idx].sum().item())
+            sample_input_ids = input_ids[batch_idx, :seq_len]
+            sample_attention_mask = attention_mask[batch_idx, :seq_len]
+            sample_input_embeddings = input_embeddings[batch_idx, :seq_len]
+            sample_labels = labels[batch_idx, :seq_len] if labels is not None else None
+
+            placeholder_positions = (sample_input_ids == self.llm_backbone.image_token_id).nonzero(as_tuple=False).flatten()
+            if len(placeholder_positions) != n_images:
+                raise ValueError(
+                    f"Sample at batch index {batch_idx} has {n_images} image(s) but {len(placeholder_positions)} "
+                    f"`<image>` token(s) after tokenization."
+                )
+
+            image_patch_blocks = projected_patch_embeddings[patch_offset : patch_offset + n_images]
+            patch_offset += n_images
+
+            embedding_chunks: List[torch.Tensor] = []
+            attention_chunks: List[torch.Tensor] = []
+            label_chunks: List[torch.Tensor] = []
+            cursor = 0
+
+            for placeholder_position, patch_block in zip(placeholder_positions.tolist(), image_patch_blocks):
+                if placeholder_position > cursor:
+                    embedding_chunks.append(sample_input_embeddings[cursor:placeholder_position])
+                    attention_chunks.append(sample_attention_mask[cursor:placeholder_position])
+                    if sample_labels is not None:
+                        label_chunks.append(sample_labels[cursor:placeholder_position])
+
+                embedding_chunks.append(patch_block)
+                attention_chunks.append(
+                    torch.ones(patch_block.shape[0], dtype=sample_attention_mask.dtype, device=sample_attention_mask.device)
+                )
+                if sample_labels is not None:
+                    label_chunks.append(
+                        torch.full(
+                            (patch_block.shape[0],),
+                            IGNORE_INDEX,
+                            dtype=sample_labels.dtype,
+                            device=sample_labels.device,
+                        )
+                    )
+
+                cursor = placeholder_position + 1
+
+            if cursor < seq_len:
+                embedding_chunks.append(sample_input_embeddings[cursor:seq_len])
+                attention_chunks.append(sample_attention_mask[cursor:seq_len])
+                if sample_labels is not None:
+                    label_chunks.append(sample_labels[cursor:seq_len])
+
+            multimodal_embeddings[batch_idx] = torch.cat(embedding_chunks, dim=0)
+            multimodal_attention_masks[batch_idx] = torch.cat(attention_chunks, dim=0)
+            if multimodal_labels is not None:
+                multimodal_labels[batch_idx] = torch.cat(label_chunks, dim=0)
+
+        return multimodal_embeddings, multimodal_attention_masks, multimodal_labels
+
     # Note =>> We're not explicitly subclassing `PreTrainedModel` because we don't need the bloat; however, `forward()`
     #          *must* match the signature of a `{Model}ForCausalLM` so that we can inherit from `GenerationMixin`
 
@@ -291,6 +389,7 @@ class PrismaticVLM(VLM):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.FloatTensor] = None,
+        image_attention_mask: Optional[torch.Tensor] = None,
         labels: Optional[torch.LongTensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
@@ -322,6 +421,9 @@ class PrismaticVLM(VLM):
         elif input_ids.shape[1] == 1 or pixel_values is None:
             raise RuntimeError("Invalid `forward()` call!")
 
+        if attention_mask is None:
+            attention_mask = input_ids.ne(self.llm_backbone.pad_token_id)
+
         # Handle Multimodal Indices is None --> pretend like the batch is fully multimodal (always image + text)!
         if multimodal_indices is None:
             multimodal_indices = torch.arange(len(input_ids), dtype=torch.long, device=input_ids.device)
@@ -341,107 +443,60 @@ class PrismaticVLM(VLM):
                 return_dict=return_dict,
             )
 
-        # Run Visual Feature Extraction
-        with torch.set_grad_enabled(self.vision_backbone_requires_grad):
-            if isinstance(pixel_values, dict):
-                patch_features = self.vision_backbone({k: pixel_values[k][multimodal_indices] for k in pixel_values})
-            else:
-                patch_features = self.vision_backbone(pixel_values[multimodal_indices])
+        if image_attention_mask is None:
+            raise ValueError("Multimodal forward requires `image_attention_mask`.")
 
-        # Projection Logic :: [bsz, num_patches, llm_embed_dim] =>> num_patches = (2 *) (256 + 1) for ViT-L + CLS
-        projected_patch_embeddings = self.projector(patch_features)
-        projected_patch_attention_mask = None
-        if attention_mask is not None:
-            projected_patch_attention_mask = torch.full(
-                (projected_patch_embeddings.shape[0], projected_patch_embeddings.shape[1]),
-                True,
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
-            )
-
-        # Get Input Embeddings from LLM Backbone :: [bsz, input_seq_len, llm_embed_dim]
+        # Get Input Embeddings from LLM Backbone before we replace `<image>` placeholders with patch blocks.
         input_embeddings = self.llm_backbone.embed_input_ids(input_ids)
 
-        # Build Multimodal Embeddings (and build resulting attention mask)
-        multimodal_embeddings = torch.cat(
-            [
-                input_embeddings[multimodal_indices, :1, :],
-                projected_patch_embeddings,
-                input_embeddings[multimodal_indices, 1:, :],
-            ],
-            dim=1,
+        # Run Visual Feature Extraction
+        flattened_pixel_values, image_counts = self._flatten_multimodal_pixel_values(
+            pixel_values, image_attention_mask, multimodal_indices
         )
-        multimodal_attention_mask = None
-        if attention_mask is not None:
-            multimodal_attention_mask = torch.cat(
-                [
-                    attention_mask[multimodal_indices, :1],
-                    projected_patch_attention_mask,
-                    attention_mask[multimodal_indices, 1:],
-                ],
-                dim=1,
-            )
+        with torch.set_grad_enabled(self.vision_backbone_requires_grad):
+            if isinstance(flattened_pixel_values, dict):
+                patch_features = self.vision_backbone(flattened_pixel_values)
+            else:
+                patch_features = self.vision_backbone(flattened_pixel_values)
 
-        # [Contract] We assume the first token of `labels` (associated with <BOS>) is already marked as "IGNORE"
-        #   => We'll ignore the per-token outputs for each of the patch embeddings as well!
-        multimodal_labels = None
-        if labels is not None:
-            projected_patch_labels = torch.full(
-                (projected_patch_embeddings.shape[0], projected_patch_embeddings.shape[1]),
-                IGNORE_INDEX,
-                dtype=labels.dtype,
-                device=labels.device,
-            )
-            multimodal_labels = torch.cat(
-                [labels[multimodal_indices, :1], projected_patch_labels, labels[multimodal_indices, 1:]], dim=1
-            )
+        # Projection Logic :: [n_images, num_patches, llm_embed_dim]
+        projected_patch_embeddings = self.projector(patch_features)
 
-        # === Add Unimodal Handling ===
-
-        # Create Fused Embeddings, Attention Mask, and Labels by Merging with "unimodal" Inputs (if applicable)
-        unimodal_indices = torch.tensor(
-            [idx for idx in range(len(input_ids)) if idx not in multimodal_indices],
-            dtype=torch.long,
-            device=multimodal_indices.device,
+        multimodal_embeddings, multimodal_attention_masks, multimodal_labels = self._build_interleaved_sequences(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            input_embeddings=input_embeddings,
+            projected_patch_embeddings=projected_patch_embeddings,
+            multimodal_indices=multimodal_indices,
+            image_counts=image_counts,
+            labels=labels,
         )
 
-        # No "unimodal" data --> Fused == Multimodal
-        if len(unimodal_indices) == 0:
-            fused_embeddings = multimodal_embeddings
-            fused_attention_mask = multimodal_attention_mask
-            fused_labels = multimodal_labels
+        fused_embedding_sequences: List[torch.Tensor] = []
+        fused_attention_sequences: List[torch.Tensor] = []
+        fused_label_sequences: Optional[List[torch.Tensor]] = [] if labels is not None else None
 
-        else:
-            # Otherwise --> Merge w/ unimodal data
+        for batch_idx in range(len(input_ids)):
+            if batch_idx in multimodal_embeddings:
+                fused_embedding_sequences.append(multimodal_embeddings[batch_idx])
+                fused_attention_sequences.append(multimodal_attention_masks[batch_idx])
+                if fused_label_sequences is not None and multimodal_labels is not None:
+                    fused_label_sequences.append(multimodal_labels[batch_idx])
+                continue
 
-            # This doesn't matter --> but in the "normal" case this is the embedding of the <PAD> token
-            #   => NOTE :: Verified that `zeros/randn/empty/<PAD> embedding` all return the same result!
-            unimodal_embeddings_pad = torch.zeros(
-                (len(unimodal_indices), projected_patch_embeddings.shape[1], input_embeddings.shape[2]),
-                dtype=input_embeddings.dtype,
-                device=input_embeddings.device,
-            )
-            unimodal_attention_pad = torch.full(
-                (len(unimodal_indices), projected_patch_embeddings.shape[1]),
-                False,
-                dtype=attention_mask.dtype,
-                device=attention_mask.device,
-            )
-            unimodal_labels_pad = torch.full(
-                (len(unimodal_indices), projected_patch_embeddings.shape[1]),
-                IGNORE_INDEX,
-                dtype=labels.dtype,
-                device=labels.device,
-            )
+            seq_len = int(attention_mask[batch_idx].sum().item())
+            fused_embedding_sequences.append(input_embeddings[batch_idx, :seq_len])
+            fused_attention_sequences.append(attention_mask[batch_idx, :seq_len])
+            if fused_label_sequences is not None and labels is not None:
+                fused_label_sequences.append(labels[batch_idx, :seq_len])
 
-            unimodal_embeddings = torch.cat([input_embeddings[unimodal_indices], unimodal_embeddings_pad], dim=1)
-            unimodal_attention_mask = torch.cat([attention_mask[unimodal_indices], unimodal_attention_pad], dim=1)
-            unimodal_labels = torch.cat([labels[unimodal_indices], unimodal_labels_pad], dim=1)
-
-            # Create "Fused" Tensors by Stacking Multimodal & Unimodal
-            fused_embeddings = torch.vstack([multimodal_embeddings, unimodal_embeddings])
-            fused_attention_mask = torch.vstack([multimodal_attention_mask, unimodal_attention_mask])
-            fused_labels = torch.vstack([multimodal_labels, unimodal_labels])
+        fused_embeddings = pad_sequence(fused_embedding_sequences, batch_first=True, padding_value=0.0)
+        fused_attention_mask = pad_sequence(fused_attention_sequences, batch_first=True, padding_value=False)
+        fused_labels = (
+            pad_sequence(fused_label_sequences, batch_first=True, padding_value=IGNORE_INDEX)
+            if fused_label_sequences is not None
+            else None
+        )
 
         # Run LLM Forward --> returns CausalLMOutputWithPast!
         return self.llm_backbone(
@@ -467,6 +522,7 @@ class PrismaticVLM(VLM):
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.FloatTensor] = None,
+        image_attention_mask: Optional[torch.Tensor] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[List[torch.FloatTensor]] = None,
         use_cache: Optional[bool] = None,
@@ -487,6 +543,7 @@ class PrismaticVLM(VLM):
             {
                 "attention_mask": attention_mask,
                 "pixel_values": pixel_values,
+                "image_attention_mask": image_attention_mask,
                 "past_key_values": past_key_values,
                 "use_cache": use_cache,
             }
@@ -499,10 +556,10 @@ class PrismaticVLM(VLM):
         self,
         pixel_values: Union[torch.Tensor, Dict[str, torch.Tensor]],
         texts: List[str],
+        image_attention_mask: Optional[torch.Tensor] = None,
         return_string_probabilities: Optional[List[str]] = None,
         **kwargs: str,
     ) -> Union[List[str], List[List[float]]]:
-        # For now, only support generation with a batch size of 1 for simplicity
         tokenizer = self.llm_backbone.tokenizer
 
         # Prepare Inputs
@@ -510,11 +567,26 @@ class PrismaticVLM(VLM):
             tokenizer(text, truncation=True, return_tensors="pt").input_ids.to(self.device) for text in texts
         ]
         if isinstance(pixel_values, torch.Tensor):
-            pixel_values = pixel_values[None, ...].to(self.device)
+            if pixel_values.ndim == 4:
+                pixel_values = pixel_values[None, ...]
+            pixel_values = pixel_values.to(self.device)
+            batch_size, max_n_images = pixel_values.shape[:2]
         elif isinstance(pixel_values, dict):
-            pixel_values = {k: v[None, ...].to(self.device) for k, v in pixel_values.items()}
+            first_value = next(iter(pixel_values.values()))
+            if first_value.ndim == 4:
+                pixel_values = {k: v[None, ...] for k, v in pixel_values.items()}
+                first_value = next(iter(pixel_values.values()))
+            pixel_values = {k: v.to(self.device) for k, v in pixel_values.items()}
+            batch_size, max_n_images = first_value.shape[:2]
         else:
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
+
+        if image_attention_mask is None:
+            image_attention_mask = torch.ones((batch_size, max_n_images), dtype=torch.bool, device=self.device)
+        else:
+            image_attention_mask = image_attention_mask.to(self.device)
+        if batch_size != len(texts):
+            raise ValueError(f"`pixel_values` batch size {batch_size} does not match number of texts {len(texts)}.")
 
         # Create Output Lists
         gen_texts, gen_probabilities = [], []
@@ -524,15 +596,21 @@ class PrismaticVLM(VLM):
         with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
             for idx, input_ids in enumerate(batch_input_ids):
                 if isinstance(pixel_values, torch.Tensor):
-                    pixel_values = pixel_values[idx]
+                    sample_pixel_values = pixel_values[idx : idx + 1]
                 elif isinstance(pixel_values, dict):
-                    pixel_values = {k: pixel_values[k][idx] for k in pixel_values}
+                    sample_pixel_values = {k: pixel_values[k][idx : idx + 1] for k in pixel_values}
                 else:
                     raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
+                sample_image_attention_mask = image_attention_mask[idx : idx + 1]
 
                 # Handle `return_string_probabilities`
                 if return_string_probabilities is None:
-                    full_out_ids = super().generate(input_ids=input_ids, pixel_values=pixel_values, **kwargs)
+                    full_out_ids = super().generate(
+                        input_ids=input_ids,
+                        pixel_values=sample_pixel_values,
+                        image_attention_mask=sample_image_attention_mask,
+                        **kwargs,
+                    )
                     gen_ids = full_out_ids[0, input_ids.shape[1] :]
 
                     # Decode `gen_ids` and strip any <EOS> tokens
@@ -541,7 +619,8 @@ class PrismaticVLM(VLM):
                 else:
                     full_out_dict = super().generate(
                         input_ids=input_ids,
-                        pixel_values=pixel_values,
+                        pixel_values=sample_pixel_values,
+                        image_attention_mask=sample_image_attention_mask,
                         output_scores=True,
                         return_dict_in_generate=True,
                         **kwargs,
@@ -568,19 +647,25 @@ class PrismaticVLM(VLM):
         return gen_texts if return_string_probabilities is None else gen_probabilities
 
     @torch.inference_mode()
-    def generate(self, image: Image, prompt_text: str, **kwargs: str) -> str:
-        # For now, only support generation with a batch size of 1 for simplicity
+    def generate(self, image: Union[Image, List[Image]], prompt_text: str, **kwargs: str) -> str:
         image_transform, tokenizer = self.vision_backbone.image_transform, self.llm_backbone.tokenizer
 
         # Prepare Inputs
         input_ids = tokenizer(prompt_text, truncation=True, return_tensors="pt").input_ids.to(self.device)
-        pixel_values = image_transform(image)
-        if isinstance(pixel_values, torch.Tensor):
-            pixel_values = pixel_values[None, ...].to(self.device)
-        elif isinstance(pixel_values, dict):
-            pixel_values = {k: v[None, ...].to(self.device) for k, v in pixel_values.items()}
+        images = image if isinstance(image, list) else [image]
+        transformed_images = [image_transform(single_image) for single_image in images]
+        if isinstance(transformed_images[0], torch.Tensor):
+            pixel_values = torch.stack(transformed_images).unsqueeze(0).to(self.device)
+        elif isinstance(transformed_images[0], dict):
+            pixel_values = {
+                key: torch.stack([transformed_image[key] for transformed_image in transformed_images]).unsqueeze(0).to(
+                    self.device
+                )
+                for key in transformed_images[0]
+            }
         else:
-            raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
+            raise ValueError(f"Unsupported `pixel_values` type = {type(transformed_images[0])}")
+        image_attention_mask = torch.ones((1, len(images)), dtype=torch.bool, device=self.device)
 
         # Invoke super().generate --> taps into `GenerationMixin` which (redirects) to `forward()`
         autocast_dtype = self.llm_backbone.half_precision_dtype
@@ -588,7 +673,8 @@ class PrismaticVLM(VLM):
             # fmt: off
             generated_ids = super().generate(
                 input_ids=input_ids,            # Shape: [1, seq]
-                pixel_values=pixel_values,      # Shape: [1, 3, res, res] or Dict[str, Shape[1, 3, res, res]]
+                pixel_values=pixel_values,      # Shape: [1, n_img, 3, res, res] or Dict[str, Shape[1, n_img, 3, res, res]]
+                image_attention_mask=image_attention_mask,
                 **kwargs
             )
             # fmt: on

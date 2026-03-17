@@ -98,6 +98,7 @@ class Qwen3VLTextLLMBackbone(LLMBackbone):
             trust_remote_code=True,
             local_files_only=local_files_only,
         )
+        self._added_image_token = self._ensure_image_token_in_tokenizer()
 
         # Build text-only decoder backbone.
         if not self.inference_mode:
@@ -112,6 +113,8 @@ class Qwen3VLTextLLMBackbone(LLMBackbone):
                 local_files_only=local_files_only,
                 torch_dtype="auto",
             )
+            if self._added_image_token:
+                full_vlm.resize_token_embeddings(len(self.tokenizer))
 
             # Keep only text decoder + lm_head as LLM backbone.
             self.llm = full_vlm.model.language_model
@@ -130,6 +133,7 @@ class Qwen3VLTextLLMBackbone(LLMBackbone):
                 local_files_only=local_files_only,
             )
             text_cfg = full_cfg.text_config
+            text_cfg.vocab_size = len(self.tokenizer)
             self.llm = Qwen3VLTextModel(text_cfg)
             self.lm_head = nn.Linear(text_cfg.hidden_size, text_cfg.vocab_size, bias=False)
 
@@ -146,6 +150,17 @@ class Qwen3VLTextLLMBackbone(LLMBackbone):
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.add_special_tokens({"pad_token": "<|endoftext|>"})
         self.llm.config.pad_token_id = self.tokenizer.pad_token_id
+        self.image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_token)
+        if self.image_token_id == self.tokenizer.unk_token_id:
+            raise ValueError(f"Failed to register `{self.image_token}` as a dedicated tokenizer token.")
+
+    def _ensure_image_token_in_tokenizer(self) -> bool:
+        image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_token)
+        if image_token_id != self.tokenizer.unk_token_id:
+            return False
+
+        num_added = self.tokenizer.add_special_tokens({"additional_special_tokens": [self.image_token]})
+        return num_added > 0
 
     def get_fsdp_wrapping_policy(self) -> Callable:
         return partial(transformer_auto_wrap_policy, transformer_layer_cls={self.transformer_layer_cls})
