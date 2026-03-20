@@ -9,7 +9,6 @@ We currently only support Map-style Datasets; assumes that all files (annotation
 random access image reading is relatively cheap/fast.
 """
 
-import copy
 import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Type
@@ -38,13 +37,25 @@ class AlignDataset(Dataset[Dict[str, torch.Tensor]]):
         self.chat_json, self.image_dir = chat_json, image_dir
         self.image_transform, self.tokenizer = image_transform, tokenizer
         self.dataset_type = "align"
+        self.image_token = "<image>"
+        self.image_token_id = self._resolve_image_token_id()
 
-        # Create Prompt Template
-        self.prompt_template = "{caption}" + self.tokenizer.eos_token
+        # Preserve a real image placeholder token in the text sequence so `PrismaticVLM.forward()` can
+        # replace it with projected patch embeddings during align training.
+        self.prompt_template = f"{self.image_token}\n{{caption}}{self.tokenizer.eos_token}"
 
         # Load Chat JSON
         with open(self.chat_json, "r") as f:
             self.examples = json.load(f)
+
+    def _resolve_image_token_id(self) -> int:
+        image_token_ids = self.tokenizer(self.image_token, add_special_tokens=False).input_ids
+        if len(image_token_ids) != 1:
+            raise ValueError(
+                "AlignDataset requires `<image>` to be preserved as a single tokenizer token, "
+                f"but got ids={image_token_ids} for tokenizer `{type(self.tokenizer)}`."
+            )
+        return int(image_token_ids[0])
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
@@ -68,23 +79,25 @@ class AlignDataset(Dataset[Dict[str, torch.Tensor]]):
         image_path, conversation = Path(self.examples[idx]["image"]), self.examples[idx]["conversations"]
         assert (len(conversation) == 2) and ("<image>" not in conversation[-1]["value"]), "Unexpected text!"
 
-        # Format Caption --> {caption}{eos_token}
+        # Format Align Prompt --> keep the placeholder token in-text and supervise only the caption tokens.
         caption = self.prompt_template.format(caption=conversation[-1]["value"].strip())
-
-        # We treat image patches as "tokens = [p1 p2 p3, ...]"; we need to specify ordering of text/patch tokens.
-        #   => Critically, we find that inserting *after* the BOS token leads to the strongest performance!
-        #       - input_ids = "<s> p1 p2 p3 ... <caption_text> \n"
-        #       - labels = "IGNORE IGNORE ..." (copy `input_ids` replacing <s> and p{1...K} with IGNORE)
-        #
-        # IMPORTANT => IF WE'RE USING HF LLM.forward(... labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
         input_ids = self.tokenizer(caption, truncation=True, return_tensors="pt").input_ids[0]
-        labels = copy.deepcopy(input_ids)
+        labels = input_ids.clone()
 
-        # Set the <BOS> token's label to IGNORE_INDEX (since we're inserting the image patches right after)
-        labels[0] = IGNORE_INDEX
+        # Ignore supervision on the placeholder token itself; `PrismaticVLM.forward()` will replace it
+        # with projected patch embeddings and ignore the corresponding patch block labels.
+        labels[input_ids == self.image_token_id] = IGNORE_INDEX
 
-        # Process Image --> get "pixel_values" (will either be a torch.Tensor OR a Dict[str,torch.Tensor])
+        # Process Image and normalize single-image samples to the same per-sample shape contract used by
+        # `FinetuneDataset`: tensors become [1, C, H, W], dict values become [1, ...]. The collator interprets
+        # the leading dimension as "number of images", so returning raw [C, H, W] here would be misread as 3 images.
         pixel_values = self.image_transform(Image.open(self.image_dir / image_path).convert("RGB"))
+        if isinstance(pixel_values, torch.Tensor):
+            pixel_values = pixel_values.unsqueeze(0)
+        elif isinstance(pixel_values, dict):
+            pixel_values = {key: value.unsqueeze(0) for key, value in pixel_values.items()}
+        else:
+            raise ValueError(f"Unsupported image transform output type `{type(pixel_values)}` in align dataset.")
 
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
 

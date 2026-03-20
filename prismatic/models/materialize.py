@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 from transformers import PreTrainedTokenizerBase
 
 from prismatic.models.backbones.llm import LLaMa2LLMBackbone, LLMBackbone, MistralLLMBackbone, PhiLLMBackbone
+from prismatic.models.backbones.llm import Qwen35TextLLMBackbone
 from prismatic.models.backbones.llm import Qwen3VLTextLLMBackbone
 from prismatic.models.backbones.vision import (
     CLIPViTBackbone,
@@ -77,6 +78,9 @@ LLM_BACKBONES = {
 
     # === Phi-2 Backbone ===
     "phi-2-3b": {"cls": PhiLLMBackbone, "kwargs": {}},
+
+    # === Qwen3.5 Text-Only Backbone ===
+    "qwen35-text-9b-base": {"cls": Qwen35TextLLMBackbone, "kwargs": {"local_files_only": True}},
 
     # === Qwen3-VL Text-Only Backbone ===
     "qwen3vl-text-8b-instruct": {"cls": Qwen3VLTextLLMBackbone, "kwargs": {"local_files_only": True}},

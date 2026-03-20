@@ -523,6 +523,23 @@ class Prism_DINOv3_Qwen3VLText_8B_TwoStage(Prism_DINOv3_Qwen3VLText_8B):
     arch_specifier: str = "gelu-mlp"
 
 
+@dataclass
+class Prism_DINOv3_Qwen35Text_9B(Exp_7B_One_Stage):
+    model_id: str = "dinov3-qwen35text-align"
+    vision_backbone_id: str = "dinov3-vit-l"
+    llm_backbone_id: str = "qwen35-text-9b-base"
+    image_resize_strategy: str = "resize-naive"
+    llm_max_length: int = 32768
+    arch_specifier: str = "no-align+gelu-mlp"
+
+
+@dataclass
+class Prism_DINOv3_Qwen35Text_9B_TwoStage(Prism_DINOv3_Qwen35Text_9B):
+    # Two-stage variant: finetune requires projector weights from align stage.
+    model_id: str = "dinov3-qwen35text-2stage"
+    arch_specifier: str = "gelu-mlp"
+
+
 # === Define a Model Registry Enum for Reference & Validation ===
 @unique
 class ModelRegistry(Enum):
@@ -603,6 +620,8 @@ class ModelRegistry(Enum):
     # === Custom :: DINOv3 + Qwen3VL Text ===
     PRISM_DINOV3_QWEN3VLTEXT_8B = Prism_DINOv3_Qwen3VLText_8B
     PRISM_DINOV3_QWEN3VLTEXT_8B_2STAGE = Prism_DINOv3_Qwen3VLText_8B_TwoStage
+    PRISM_DINOV3_QWEN35TEXT_9B = Prism_DINOv3_Qwen35Text_9B
+    PRISM_DINOV3_QWEN35TEXT_9B_2STAGE = Prism_DINOv3_Qwen35Text_9B_TwoStage
 
     @property
     def model_id(self) -> str:
