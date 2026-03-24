@@ -144,6 +144,30 @@ class CarPaint_Binary_Config(DatasetConfig):
     dataset_root_dir: Path = Path("data")
 
 
+@dataclass
+class CarPaint_Binary_Balanced_Config(DatasetConfig):
+    dataset_id: str = "carpaint-binary-balanced"
+
+    # Keep align fields valid to preserve current framework contract.
+    align_stage_components: Tuple[Path, Path] = (
+        Path("download/llava-laion-cc-sbu-558k/chat_train.json"),
+        Path("download/llava-laion-cc-sbu-558k/"),
+    )
+    align_val_stage_components: Optional[Tuple[Path, Path]] = (
+        Path("download/llava-laion-cc-sbu-558k/chat_val.json"),
+        Path("download/llava-laion-cc-sbu-558k/"),
+    )
+    finetune_stage_components: Tuple[Path, Path] = (
+        Path("labeled_jpg_1-1/carpaint_finetune_chat_train.json"),
+        Path("labeled_jpg_1-1/"),
+    )
+    finetune_val_stage_components: Optional[Tuple[Path, Path]] = (
+        Path("labeled_jpg_1-1/carpaint_finetune_chat_val.json"),
+        Path("labeled_jpg_1-1/"),
+    )
+    dataset_root_dir: Path = Path("data")
+
+
 # === Define a Dataset Registry Enum for Reference & Validation =>> all *new* datasets must be added here! ===
 @unique
 class DatasetRegistry(Enum):
@@ -157,6 +181,7 @@ class DatasetRegistry(Enum):
 
     LLAVA_LVIS4V_LRV = LLaVa_LVIS4V_LRV_Config
     CARPAINT_BINARY = CarPaint_Binary_Config
+    CARPAINT_BINARY_BALANCED = CarPaint_Binary_Balanced_Config
 
     @property
     def dataset_id(self) -> str:
