@@ -136,6 +136,7 @@ dmypy.json
 .wandb_api_key
 .*_token
 .*api_key
+.codex
 
 # IDE Caches
 .idea/

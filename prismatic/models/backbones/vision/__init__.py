@@ -4,5 +4,7 @@ from .dinoclip_vit import DinoCLIPViTBackbone
 from .dinosiglip_vit import DinoSigLIPViTBackbone
 from .dinov2_vit import DinoV2ViTBackbone
 from .dinov3_vit import DinoV3ViTBackbone
+from .dinov3_qwen35vit import DINOv3Qwen35ViTBackbone
 from .in1k_vit import IN1KViTBackbone
+from .qwen35_vit import Qwen35ViTBackbone
 from .siglip_vit import SigLIPViTBackbone

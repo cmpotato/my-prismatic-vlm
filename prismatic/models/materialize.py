@@ -15,11 +15,13 @@ from prismatic.models.backbones.llm import Qwen3VLTextLLMBackbone
 from prismatic.models.backbones.vision import (
     CLIPViTBackbone,
     DinoCLIPViTBackbone,
+    DINOv3Qwen35ViTBackbone,
     DinoSigLIPViTBackbone,
     DinoV2ViTBackbone,
     DinoV3ViTBackbone,
     ImageTransform,
     IN1KViTBackbone,
+    Qwen35ViTBackbone,
     SigLIPViTBackbone,
     VisionBackbone,
 )
@@ -55,6 +57,12 @@ VISION_BACKBONES = {
     # === Fused Backbones ===
     "dinoclip-vit-l-336px": {"cls": DinoCLIPViTBackbone, "kwargs": {"default_image_size": 336}},
     "dinosiglip-vit-so-384px": {"cls": DinoSigLIPViTBackbone, "kwargs": {"default_image_size": 384}},
+
+    # === Qwen3.5-ViT (standalone) ===
+    "qwen35-vit": {"cls": Qwen35ViTBackbone, "kwargs": {"default_image_size": 224}},
+
+    # === DINOv3 + Qwen3.5-ViT Dual Tower ===
+    "dinov3qwen35vit-224px": {"cls": DINOv3Qwen35ViTBackbone, "kwargs": {"default_image_size": 224}},
 }
 
 
