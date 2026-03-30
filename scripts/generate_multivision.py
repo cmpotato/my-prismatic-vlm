@@ -52,13 +52,18 @@ class GenerateMultiVisionConfig:
 def _resolve_checkpoint_path(checkpoint: Union[str, Path]) -> Path:
     path = Path(checkpoint)
     if path.is_dir():
+        # Priority: best-val checkpoint > latest checkpoint
+        best_candidates = sorted(path.glob("best-val-*.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if best_candidates:
+            return best_candidates[0]
+
         run_candidate = path / "checkpoints" / "latest-checkpoint.pt"
         direct_candidate = path / "latest-checkpoint.pt"
         if run_candidate.exists():
             return run_candidate
         if direct_candidate.exists():
             return direct_candidate
-        raise FileNotFoundError(f"Could not find `latest-checkpoint.pt` under `{path}`")
+        raise FileNotFoundError(f"Could not find a checkpoint (.pt) under `{path}`")
 
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint does not exist: `{path}`")
@@ -72,10 +77,16 @@ def _resolve_model_config_path(checkpoint_path: Path, model_config: Optional[Uni
             raise FileNotFoundError(f"Model config does not exist: `{config_path}`")
         return config_path
 
+    # Case 1: checkpoint in checkpoints/ subdir -> config.json is in parent run dir
     if checkpoint_path.parent.name == "checkpoints":
         candidate = checkpoint_path.parent.parent / "config.json"
         if candidate.exists():
             return candidate
+
+    # Case 2: checkpoint directly in run dir (e.g. best-val-*.pt)
+    candidate = checkpoint_path.parent / "config.json"
+    if candidate.exists():
+        return candidate
 
     raise FileNotFoundError(
         "Could not infer model config. Please pass `--model_config /path/to/config.json` explicitly."
@@ -102,18 +113,20 @@ def _summarize_checkpoint_format(checkpoint_obj: dict) -> str:
     return "projector-only"
 
 
-def _load_checkpoint_into_vlm(vlm: PrismaticVLM, checkpoint_path: Path) -> str:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    model_state = checkpoint["model"]
+def _load_checkpoint_into_vlm(vlm: PrismaticVLM, checkpoint: dict, checkpoint_path: Path) -> tuple:
+    """Load checkpoint weights into the VLM. Returns (checkpoint_format, vlm)."""
     checkpoint_format = _summarize_checkpoint_format(checkpoint)
 
     if checkpoint_format == "projector-only":
+        model_state = checkpoint["model"]
         load_result = vlm.projector.load_state_dict(model_state["projector"], strict=True)
         if load_result.missing_keys or load_result.unexpected_keys:
             raise RuntimeError(
                 "Projector load mismatch: "
                 f"missing={load_result.missing_keys}, unexpected={load_result.unexpected_keys}"
             )
+        # Enable KV-cache for generation (projector-only loads the base LLM without it)
+        vlm.llm_backbone.llm.config.use_cache = True
     else:
         vlm = PrismaticVLM.from_pretrained(
             checkpoint_path,
@@ -158,6 +171,7 @@ def generate_multivision(cfg: GenerateMultiVisionConfig) -> None:
         config_json = json.load(f)
     model_cfg = config_json["model"] if "model" in config_json else config_json
 
+    # For "full" checkpoints, LLM weights come from the checkpoint itself (skip loading base)
     llm_inference_mode = checkpoint_format == "full"
 
     overwatch.info(f"Building base model from config `{config_path}`")
@@ -184,7 +198,7 @@ def generate_multivision(cfg: GenerateMultiVisionConfig) -> None:
         enable_mixed_precision_training=model_cfg.get("enable_mixed_precision_training", True),
     )
 
-    checkpoint_format, loaded_vlm = _load_checkpoint_into_vlm(vlm, checkpoint_path)
+    checkpoint_format, loaded_vlm = _load_checkpoint_into_vlm(vlm, checkpoint, checkpoint_path)
     vlm = loaded_vlm
     vlm.requires_grad_(False)
     vlm.eval()
