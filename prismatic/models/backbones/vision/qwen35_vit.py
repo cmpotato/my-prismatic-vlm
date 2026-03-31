@@ -69,7 +69,9 @@ class Qwen35ViTBackbone(VisionBackbone):
         from transformers import AutoConfig
 
         full_config = AutoConfig.from_pretrained(cfg["model_path"], trust_remote_code=True)
-        vision_config = VisionConfigCls(**full_config.vision_config)
+        vision_config = full_config.vision_config
+        if not isinstance(vision_config, VisionConfigCls):
+            vision_config = VisionConfigCls(**vision_config)
 
         self.featurizer = VisionModelCls(vision_config)
         self.featurizer.eval()

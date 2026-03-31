@@ -205,15 +205,30 @@ def generate_multivision(cfg: GenerateMultiVisionConfig) -> None:
     vlm.to(device, dtype=dtype)
 
     image = _load_image(cfg.image_source)
+    is_align_only = checkpoint_format == "projector-only"
+
     prompt_builder = vlm.get_prompt_builder(system_prompt=cfg.system_prompt)
     system_prompt = prompt_builder.system_prompt
 
     overwatch.info(f"Loaded checkpoint from `{checkpoint_path}`")
     overwatch.info(_describe_image_inputs(vlm, image))
 
+    def _build_prompt(user_message: str, *, is_first_turn: bool = True) -> str:
+        """Build prompt text matching the training format.
+
+        For align (projector-only) checkpoints the training data is just ``<image>\\n{caption}<eos>``
+        so we feed ``<image>\\n`` and let the model generate the caption.
+        For finetuned checkpoints we use the PurePromptBuilder ``In: ... Out: `` template.
+        """
+        if is_align_only:
+            return "<image>\n"
+        if is_first_turn:
+            user_message = f"<image>\n{user_message}"
+        prompt_builder.add_turn(role="human", message=user_message)
+        return prompt_builder.get_prompt()
+
     if cfg.prompt is not None:
-        prompt_builder.add_turn(role="human", message=cfg.prompt)
-        prompt_text = prompt_builder.get_prompt()
+        prompt_text = _build_prompt(cfg.prompt)
         generated_text = vlm.generate(
             image,
             prompt_text,
@@ -225,12 +240,20 @@ def generate_multivision(cfg: GenerateMultiVisionConfig) -> None:
         print(generated_text)
         return
 
-    print(
-        "[*] Multi-vision inference REPL ready:\n"
-        f"       => Prompt template:\n\n{prompt_builder.get_potential_prompt('<INSERT PROMPT HERE>')}\n\n"
-        f"       => Image source: `{cfg.image_source}`\n"
-        f"       => Checkpoint format: `{checkpoint_format}`\n===\n"
-    )
+    if is_align_only:
+        print(
+            "[*] Multi-vision inference REPL ready (align / projector-only mode):\n"
+            "       => Prompt: <image>\\n  (model generates caption directly)\n"
+            f"       => Image source: `{cfg.image_source}`\n"
+            f"       => Checkpoint format: `{checkpoint_format}`\n===\n"
+        )
+    else:
+        print(
+            "[*] Multi-vision inference REPL ready:\n"
+            f"       => Prompt template:\n\n{prompt_builder.get_potential_prompt('<INSERT PROMPT HERE>')}\n\n"
+            f"       => Image source: `{cfg.image_source}`\n"
+            f"       => Checkpoint format: `{checkpoint_format}`\n===\n"
+        )
 
     repl_prompt = (
         "|=>> Enter (i)mage source(URL/path), (p)rompt template, (q)uit, or any other key to start chatting: "
@@ -245,11 +268,15 @@ def generate_multivision(cfg: GenerateMultiVisionConfig) -> None:
         if user_input.lower().startswith("i"):
             source = input("\n|=>> Enter Image URL or local path: ")
             image = _load_image(source)
-            prompt_builder = vlm.get_prompt_builder(system_prompt=system_prompt)
+            if not is_align_only:
+                prompt_builder = vlm.get_prompt_builder(system_prompt=system_prompt)
             overwatch.info(_describe_image_inputs(vlm, image))
             continue
 
         if user_input.lower().startswith("p"):
+            if is_align_only:
+                print("\n|=>> Align-only checkpoint does not support prompt templates!")
+                continue
             if system_prompt is None:
                 print("\n|=>> Model does not support `system_prompt`!")
                 continue
@@ -262,12 +289,29 @@ def generate_multivision(cfg: GenerateMultiVisionConfig) -> None:
             )
             continue
 
+        if is_align_only:
+            # Align-only: no multi-turn -- just caption the current image once
+            print("\n[*] Generating caption for current image...\n")
+            prompt_text = _build_prompt("")
+            generated_text = vlm.generate(
+                image,
+                prompt_text,
+                do_sample=cfg.do_sample,
+                temperature=cfg.temperature,
+                max_new_tokens=cfg.max_new_tokens,
+                min_length=cfg.min_length,
+            )
+            print(f"\t|=>> VLM Response >>> {generated_text}\n")
+            continue
+
         print("\n[*] Entering chat session - CTRL-C to reset conversation!\n===\n")
         try:
+            first_turn = True
             while True:
                 message = input("|=>> Enter Prompt: ")
-                prompt_builder.add_turn(role="human", message=message)
-                prompt_text = prompt_builder.get_prompt()
+                prompt_text = _build_prompt(message, is_first_turn=first_turn)
+                if first_turn:
+                    first_turn = False
 
                 generated_text = vlm.generate(
                     image,

@@ -146,8 +146,13 @@ class DINOv3Qwen35ViTBackbone(VisionBackbone):
         Returns:
             [B, num_patches, 1024 + 1152 = 2176]
         """
-        dinov3_patches = self.dinov3_featurizer(pixel_values["dinov3"])     # [B, 196, 1024]
+        dinov3_patches = self.dinov3_featurizer(pixel_values["dinov3"])     # [B, N, 1024]
         qwen35_patches = self.qwen35vit(pixel_values["qwen35vit"])         # [B, 196, 1152]
+
+        # Strip CLS + register prefix tokens from DINOv3 if present (e.g. 1 CLS + 4 regs = 5)
+        n_prefix = getattr(self.dinov3_featurizer, "num_prefix_tokens", 0)
+        if n_prefix > 0:
+            dinov3_patches = dinov3_patches[:, n_prefix:]                   # [B, 196, 1024]
 
         return torch.cat([dinov3_patches, qwen35_patches], dim=2)          # [B, 196, 2176]
 

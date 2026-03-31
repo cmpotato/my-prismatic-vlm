@@ -105,8 +105,15 @@ def generate(cfg: GenerateConfig) -> None:
         else:
             print("\n[*] Entering Chat Session - CTRL-C to start afresh!\n===\n")
             try:
+                first_turn = True
                 while True:
                     message = input("|=>> Enter Prompt: ")
+
+                    # First turn must carry the <image> placeholder so the VLM knows where to
+                    # inject visual patch embeddings (matches the training data format).
+                    if first_turn:
+                        message = f"<image>\n{message}"
+                        first_turn = False
 
                     # Build Prompt
                     prompt_builder.add_turn(role="human", message=message)
