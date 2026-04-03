@@ -1,4 +1,4 @@
-from .base_prompter import PromptBuilder, PurePromptBuilder
+from .base_prompter import PromptBuilder, PurePromptBuilder, Qwen35PurePromptBuilder, Qwen3VLPurePromptBuilder
 from .llama2_chat_prompter import LLaMa2ChatPromptBuilder
 from .mistral_instruct_prompter import MistralInstructPromptBuilder
 from .phi_prompter import PhiPromptBuilder

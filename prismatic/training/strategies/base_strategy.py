@@ -178,7 +178,7 @@ class TrainingStrategy(ABC):
         seed: int = 7,
     ) -> None:
         """Run the training loop for the given `dataset` and `collator`; log losses, results to `metrics`"""
-        checkpoint_every_steps = 100
+        checkpoint_every_steps = 20
 
         if "finetune" in stage and batch_construction_strategy == "split-modality":
             # Instantiate the split-modality sampler; if you want to extend with other batch construction schemes,

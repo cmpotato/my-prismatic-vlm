@@ -26,11 +26,15 @@ class PromptBuilder(ABC):
 
 
 class PurePromptBuilder(PromptBuilder):
+    bos_token = "<s>"
+    eos_token = "</s>"
+
     def __init__(self, model_family: str, system_prompt: Optional[str] = None) -> None:
         super().__init__(model_family, system_prompt)
 
-        # TODO (siddk) =>> Can't always assume LlamaTokenizer --> FIX ME!
-        self.bos, self.eos = "<s>", "</s>"
+        # Legacy "pure" prompting format used by non-chat instruction tuning.
+        # Subclasses override `eos_token` when a model family uses a different real EOS token.
+        self.bos, self.eos = self.bos_token, self.eos_token
 
         # Get role-specific "wrap" functions
         self.wrap_human = lambda msg: f"In: {msg}\nOut: "
@@ -71,3 +75,13 @@ class PurePromptBuilder(PromptBuilder):
     def get_prompt(self) -> str:
         # Remove prefix <bos> (if exists) because it gets auto-inserted by tokenizer!
         return self.prompt.removeprefix(self.bos).rstrip()
+
+
+class Qwen35PurePromptBuilder(PurePromptBuilder):
+    # Qwen3.5 text uses `<|endoftext|>` as its real EOS token.
+    eos_token = "<|endoftext|>"
+
+
+class Qwen3VLPurePromptBuilder(PurePromptBuilder):
+    # Qwen3-VL Instruct uses `<|im_end|>` as its real EOS token.
+    eos_token = "<|im_end|>"

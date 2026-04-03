@@ -19,7 +19,7 @@ from transformers import AutoConfig, AutoTokenizer, GenerationConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from prismatic.models.backbones.llm.base_llm import LLMBackbone
-from prismatic.models.backbones.llm.prompting import PromptBuilder, PurePromptBuilder
+from prismatic.models.backbones.llm.prompting import PromptBuilder, Qwen35PurePromptBuilder
 from prismatic.overwatch import initialize_overwatch
 
 overwatch = initialize_overwatch(__name__)
@@ -317,7 +317,7 @@ class Qwen35TextLLMBackbone(LLMBackbone):
 
     @property
     def prompt_builder_fn(self) -> Type[PromptBuilder]:
-        return PurePromptBuilder
+        return Qwen35PurePromptBuilder
 
     @property
     def transformer_layer_cls(self) -> Type[nn.Module]:

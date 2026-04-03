@@ -24,7 +24,7 @@ from transformers.models.qwen3_vl.modeling_qwen3_vl import (
 )
 
 from prismatic.models.backbones.llm.base_llm import LLMBackbone
-from prismatic.models.backbones.llm.prompting import PromptBuilder, PurePromptBuilder
+from prismatic.models.backbones.llm.prompting import PromptBuilder, Qwen3VLPurePromptBuilder
 from prismatic.overwatch import initialize_overwatch
 
 overwatch = initialize_overwatch(__name__)
@@ -300,8 +300,8 @@ class Qwen3VLTextLLMBackbone(LLMBackbone):
 
     @property
     def prompt_builder_fn(self) -> Type[PromptBuilder]:
-        # Align stage does not use PromptBuilder; use pure formatting for compatibility.
-        return PurePromptBuilder
+        # Align stage does not use PromptBuilder; finetune should still use the correct Qwen3-VL EOS token.
+        return Qwen3VLPurePromptBuilder
 
     @property
     def transformer_layer_cls(self) -> Type[nn.Module]:
